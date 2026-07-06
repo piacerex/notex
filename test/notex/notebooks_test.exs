@@ -6,6 +6,7 @@ defmodule Notex.NotebooksTest do
   setup do
     old_config = Application.get_env(:notex, Notex.LLM)
     old_web_search_config = Application.get_env(:notex, Notex.WebSearch)
+    old_image_config = Application.get_env(:notex, Notex.ImageGeneration)
 
     Application.put_env(
       :notex,
@@ -22,6 +23,12 @@ defmodule Notex.NotebooksTest do
         Application.put_env(:notex, Notex.WebSearch, old_web_search_config)
       else
         Application.delete_env(:notex, Notex.WebSearch)
+      end
+
+      if old_image_config do
+        Application.put_env(:notex, Notex.ImageGeneration, old_image_config)
+      else
+        Application.delete_env(:notex, Notex.ImageGeneration)
       end
     end)
   end
@@ -245,6 +252,135 @@ defmodule Notex.NotebooksTest do
     assert renamed.title == "NewPJ 4"
   end
 
+  test "preserves punctuation in project display names" do
+    assert {:ok, renamed} = Notebooks.update_project_name("ピーター・ティールBot")
+    assert renamed.title == "ピーター・ティールBot"
+
+    assert [%{name: "ピーター・ティールBot"}] = Notebooks.list_projects()
+
+    selected_slug =
+      Notebooks.list_projects()
+      |> List.first()
+      |> Map.fetch!(:slug)
+
+    Application.delete_env(:notex, :active_project)
+
+    assert {:ok, selected} = Notebooks.select_project(selected_slug)
+    assert selected.title == "ピーター・ティールBot"
+  end
+
+  test "deletes the active project and selects a remaining project" do
+    notebook = Notebooks.get_default_notebook()
+
+    assert {:ok, _source} =
+             Notebooks.add_source(notebook, %{
+               title: "Project source",
+               body: "Project source body."
+             })
+
+    assert {:ok, created} = Notebooks.create_project()
+    assert created.title == "NewPJ 2"
+
+    assert {:ok, selected} = Notebooks.delete_project()
+    assert selected.title == "NewPJ"
+    assert Enum.map(Notebooks.list_projects(), & &1.name) == ["NewPJ"]
+
+    assert [_source_path] =
+             Path.wildcard(Path.join(storage_root(), "projects/newpj/inputs/*.json"))
+
+    assert [] == Path.wildcard(Path.join(storage_root(), "projects/newpj-2"))
+  end
+
+  test "data table studio artifacts normalize json answers to markdown" do
+    old_config = Application.get_env(:notex, Notex.LLM)
+    Application.put_env(:notex, Notex.LLM, Keyword.put(old_config, :provider, __MODULE__))
+
+    notebook = Notebooks.get_default_notebook()
+
+    assert {:ok, source} =
+             Notebooks.add_source(notebook, %{
+               title: "Table source",
+               body: "Alpha has useful value. Beta has other useful value."
+             })
+
+    assert {:ok, result} =
+             Notebooks.generate_studio_artifact(notebook, "data_table", source_ids: [source.id])
+
+    assert result.answer =~ "| detail | item |"
+    assert result.answer =~ "| Useful value [1] | Alpha |"
+    refute result.answer =~ ~s("item")
+
+    assert [_path] =
+             Path.wildcard(Path.join(storage_root(), "projects/*/outputs/data-table/*.md"))
+
+    assert [] == Path.wildcard(Path.join(storage_root(), "projects/*/outputs/data-table/*.json"))
+    assert Enum.any?(Notebooks.list_messages(notebook), &(&1.content == result.answer))
+  end
+
+  test "mind map studio artifacts normalize outline answers to mermaid markdown" do
+    old_config = Application.get_env(:notex, Notex.LLM)
+    Application.put_env(:notex, Notex.LLM, Keyword.put(old_config, :provider, __MODULE__))
+
+    notebook = Notebooks.get_default_notebook()
+
+    assert {:ok, source} =
+             Notebooks.add_source(notebook, %{
+               title: "Map source",
+               body: "Launch planning has risks, owners, and follow-up decisions."
+             })
+
+    assert {:ok, result} =
+             Notebooks.generate_studio_artifact(notebook, "mind_map", source_ids: [source.id])
+
+    assert result.answer =~ "```mermaid"
+    assert result.answer =~ "mindmap"
+    assert result.answer =~ "root((Launch Planning))"
+    assert result.answer =~ "Risks"
+    assert result.answer =~ "```"
+    refute result.answer =~ "[1]"
+
+    assert [_path] =
+             Path.wildcard(Path.join(storage_root(), "projects/*/outputs/mind-map/*.md"))
+
+    assert [] == Path.wildcard(Path.join(storage_root(), "projects/*/outputs/mind-map/*.json"))
+    assert Enum.any?(Notebooks.list_messages(notebook), &(&1.content == result.answer))
+  end
+
+  test "infographic studio artifacts use Codex app-server image generation" do
+    image_base64 = Base.encode64("fake png")
+
+    Application.put_env(:notex, Notex.ImageGeneration,
+      model: "gpt-5.5",
+      reasoning_effort: "low",
+      app_server: fn prompt, config ->
+        assert config.model == "gpt-5.5"
+        assert config.reasoning_effort == "low"
+        assert prompt =~ "Create a polished editorial infographic"
+        assert prompt =~ "horizontal landscape canvas"
+        assert prompt =~ "do not make a vertical poster"
+        assert prompt =~ "Alpha has useful value"
+
+        {:ok, image_base64, %{"revised_prompt" => "test infographic prompt"}}
+      end
+    )
+
+    notebook = Notebooks.get_default_notebook()
+
+    assert {:ok, source} =
+             Notebooks.add_source(notebook, %{
+               title: "Graphic source",
+               body: "Alpha has useful value. Beta has other useful value."
+             })
+
+    assert {:ok, result} =
+             Notebooks.generate_studio_artifact(notebook, "infographic", source_ids: [source.id])
+
+    assert result.answer == "data:image/png;base64,#{image_base64}"
+    assert result.llm["provider"] == "codex_app_server"
+    assert result.llm["model"] == "gpt-5.5"
+    assert result.llm["revised_prompt"] == "test infographic prompt"
+  end
+
   test "studio artifacts require evidence" do
     notebook = Notebooks.get_default_notebook()
 
@@ -298,6 +434,36 @@ defmodule Notex.NotebooksTest do
              Notebooks.ask_question(notebook, "Where is support risk highest?")
 
     assert Notebooks.list_messages(notebook) == []
+  end
+
+  def synthesize(question, _matches, _opts) do
+    content =
+      cond do
+        question =~ "markdown data table" ->
+          ~s([{"item":"Alpha","detail":"Useful value [1]"},{"item":"Beta","detail":"Other useful value [1]"}])
+
+        question =~ "Mermaid mind map" ->
+          """
+          Launch Planning [1]
+            - Risks [1]
+            - Owners [1]
+            - Decisions [1]
+          """
+
+        true ->
+          "Stubbed LLM answer from the provided evidence [1]"
+      end
+
+    {:ok, content, %{"provider" => "test", "model" => "test", "reasoning_effort" => "low"}}
+  end
+
+  def status do
+    %{
+      provider: "test",
+      model: "test",
+      reasoning_effort: "low",
+      configured?: true
+    }
   end
 
   def web_requester("https://www.bing.com/search?format=rss&q=many") do

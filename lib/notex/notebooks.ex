@@ -3,12 +3,13 @@ defmodule Notex.Notebooks do
   File-backed notebook storage, source ingestion, retrieval, and cited draft answers.
   """
 
-  alias Notex.{LLM, WebSearch}
+  alias Notex.{ImageGeneration, LLM, WebSearch}
   alias Notex.Notebooks.{Message, Notebook, Source, SourceChunk, Text}
 
   @default_title "NewPJ"
   @default_description "Local source-grounded notes"
   @chat_messages_file "chat-messages.jsonl"
+  @project_metadata_file "project.json"
   @active_project_key :active_project
 
   def project_name do
@@ -50,6 +51,7 @@ defmodule Notex.Notebooks do
 
     ensure_project_dir_moved(old.slug, new.slug)
     set_active_project_metadata(new)
+    write_project_metadata(new)
     {:ok, get_default_notebook()}
   end
 
@@ -60,7 +62,29 @@ defmodule Notex.Notebooks do
     File.mkdir_p!(project_dir(metadata.slug))
     File.mkdir_p!(inputs_dir(metadata.slug))
     File.mkdir_p!(outputs_dir(metadata.slug))
+    write_project_metadata(metadata)
     {:ok, get_default_notebook()}
+  end
+
+  def delete_project do
+    ensure_storage!()
+    current = project_metadata()
+    current_path = project_dir(current.slug)
+
+    if File.dir?(current_path) do
+      File.rm_rf!(current_path)
+    end
+
+    next_slug =
+      existing_project_slugs()
+      |> Enum.to_list()
+      |> Enum.sort()
+      |> List.first()
+
+    case next_slug do
+      nil -> create_project()
+      slug -> select_project(slug)
+    end
   end
 
   def select_project(slug) when is_binary(slug) do
@@ -177,16 +201,9 @@ defmodule Notex.Notebooks do
     output_id = normalize_id(output_id)
 
     deleted? =
-      outputs_dir()
-      |> Path.join("*/*.json")
-      |> Path.wildcard()
+      studio_output_paths()
       |> Enum.find_value(false, fn path ->
-        id =
-          path
-          |> Path.basename(".json")
-          |> String.split("-", parts: 2)
-          |> List.first()
-          |> normalize_id()
+        id = studio_output_id_from_path(path)
 
         if id == output_id do
           File.rm(path) == :ok
@@ -390,7 +407,8 @@ defmodule Notex.Notebooks do
   def generate_studio_artifact(%Notebook{} = notebook, artifact_type, opts \\ []) do
     with {:ok, spec} <- studio_spec(artifact_type),
          matches when matches != [] <- studio_matches(notebook, opts),
-         {:ok, answer, llm_meta} <- synthesize_answer(spec.prompt, matches) do
+         {:ok, answer, studio_meta} <- generate_studio_content(spec, matches) do
+      answer = normalize_studio_answer(spec.type, answer)
       citations = citations_for(matches)
       now = now()
 
@@ -423,7 +441,7 @@ defmodule Notex.Notebooks do
          answer: answer,
          citations: citations,
          matches: matches,
-         llm: llm_meta,
+         llm: studio_meta,
          artifact: spec.title
        }}
     else
@@ -431,6 +449,248 @@ defmodule Notex.Notebooks do
       {:error, reason} -> {:error, reason}
     end
   end
+
+  defp generate_studio_content(%{generator: :image} = spec, matches) do
+    spec
+    |> image_prompt(matches)
+    |> ImageGeneration.generate()
+    |> case do
+      {:ok, %{content: content, meta: meta}} -> {:ok, content, meta}
+      {:error, reason} -> {:error, {:image_unavailable, reason}}
+    end
+  end
+
+  defp generate_studio_content(spec, matches), do: synthesize_answer(spec.prompt, matches)
+
+  defp image_prompt(spec, matches) do
+    evidence =
+      matches
+      |> Enum.with_index(1)
+      |> Enum.map_join("\n\n", fn {match, index} ->
+        """
+        [#{index}] #{match.source_title}
+        #{match.excerpt}
+        """
+      end)
+
+    """
+    #{spec.prompt}
+
+    Evidence:
+    #{evidence}
+    """
+  end
+
+  defp normalize_studio_answer("data-table", answer) when is_binary(answer) do
+    trimmed = String.trim(answer)
+
+    cond do
+      markdown_table?(trimmed) ->
+        answer
+
+      true ->
+        case Jason.decode(trimmed) do
+          {:ok, decoded} -> decoded_to_markdown_table(decoded, answer)
+          {:error, _reason} -> answer
+        end
+    end
+  end
+
+  defp normalize_studio_answer("mind-map", answer) when is_binary(answer) do
+    trimmed = String.trim(answer)
+
+    cond do
+      String.contains?(trimmed, "```mermaid") ->
+        trimmed
+        |> mermaid_fence_content()
+        |> normalize_mermaid_mindmap()
+        |> mermaid_markdown()
+
+      String.starts_with?(trimmed, "mindmap") ->
+        trimmed
+        |> normalize_mermaid_mindmap()
+        |> mermaid_markdown()
+
+      true ->
+        answer
+        |> outline_to_mermaid_mindmap()
+        |> mermaid_markdown()
+    end
+  end
+
+  defp normalize_studio_answer(_type, answer), do: answer
+
+  defp mermaid_markdown(content), do: "```mermaid\n#{String.trim(content)}\n```"
+
+  defp mermaid_fence_content(markdown) do
+    case Regex.run(~r/```mermaid\s*(.*?)```/s, markdown, capture: :all_but_first) do
+      [content] -> content
+      _other -> markdown
+    end
+  end
+
+  defp normalize_mermaid_mindmap(content) do
+    content
+    |> String.split("\n")
+    |> Enum.map(&normalize_mermaid_mindmap_line/1)
+    |> Enum.reject(&(&1 == ""))
+    |> case do
+      [] -> "mindmap\n  root((Mind Map))"
+      ["mindmap" | _rest] = lines -> Enum.join(lines, "\n")
+      lines -> Enum.join(["mindmap" | lines], "\n")
+    end
+  end
+
+  defp normalize_mermaid_mindmap_line(line) do
+    trimmed = String.trim(line)
+
+    cond do
+      trimmed == "" ->
+        ""
+
+      trimmed == "mindmap" ->
+        "mindmap"
+
+      String.starts_with?(trimmed, "root((") ->
+        root =
+          trimmed
+          |> String.replace_prefix("root((", "")
+          |> String.replace_suffix("))", "")
+          |> mermaid_node_text()
+
+        "  root((#{root}))"
+
+      true ->
+        leading_spaces =
+          line
+          |> String.length()
+          |> Kernel.-(String.length(String.trim_leading(line)))
+
+        level = max(div(leading_spaces, 2), 2)
+        String.duplicate("  ", level) <> mermaid_node_text(trimmed)
+    end
+  end
+
+  defp outline_to_mermaid_mindmap(answer) do
+    nodes =
+      answer
+      |> String.split("\n")
+      |> Enum.map(&outline_line/1)
+      |> Enum.reject(&is_nil/1)
+
+    case nodes do
+      [] ->
+        "mindmap\n  root((Mind Map))"
+
+      [{_level, root} | children] ->
+        root = mermaid_node_text(root)
+
+        child_lines =
+          children
+          |> Enum.map(fn {level, text} ->
+            indent = String.duplicate("  ", max(level + 2, 2))
+            indent <> mermaid_node_text(text)
+          end)
+
+        ["mindmap", "  root((#{root}))" | child_lines]
+        |> Enum.join("\n")
+    end
+  end
+
+  defp outline_line(line) do
+    trimmed = String.trim(line)
+
+    if trimmed == "" do
+      nil
+    else
+      leading_spaces =
+        line |> String.length() |> Kernel.-(String.length(String.trim_leading(line)))
+
+      level = div(leading_spaces, 2)
+
+      text =
+        trimmed
+        |> String.trim_leading("#")
+        |> String.replace(~r/^[-*]\s+/, "")
+        |> String.replace(~r/^\d+[\).\s-]+/, "")
+        |> String.trim()
+
+      if text == "", do: nil, else: {level, text}
+    end
+  end
+
+  defp mermaid_node_text(text) do
+    text
+    |> String.replace(~r/\s*\[[^\]]+\]/, "")
+    |> String.replace(~r/[(){}\[\]]/, "")
+    |> String.replace(~r/[<>|`]/, "")
+    |> String.replace("\"", "'")
+    |> String.trim()
+  end
+
+  defp markdown_table?(answer) do
+    answer
+    |> String.split("\n")
+    |> Enum.any?(
+      &(String.starts_with?(String.trim(&1), "|") and String.ends_with?(String.trim(&1), "|"))
+    )
+  end
+
+  defp decoded_to_markdown_table(rows, fallback) when is_list(rows) do
+    rows
+    |> Enum.filter(&is_map/1)
+    |> rows_to_markdown_table(fallback)
+  end
+
+  defp decoded_to_markdown_table(%{"rows" => rows}, fallback) when is_list(rows) do
+    decoded_to_markdown_table(rows, fallback)
+  end
+
+  defp decoded_to_markdown_table(%{"data" => rows}, fallback) when is_list(rows) do
+    decoded_to_markdown_table(rows, fallback)
+  end
+
+  defp decoded_to_markdown_table(map, fallback) when is_map(map) do
+    rows_to_markdown_table([map], fallback)
+  end
+
+  defp decoded_to_markdown_table(_decoded, fallback), do: fallback
+
+  defp rows_to_markdown_table([], fallback), do: fallback
+
+  defp rows_to_markdown_table(rows, _fallback) do
+    headers =
+      rows
+      |> Enum.flat_map(&Map.keys/1)
+      |> Enum.uniq()
+      |> Enum.sort()
+
+    separator = Enum.map(headers, fn _header -> "---" end)
+
+    body =
+      Enum.map(rows, fn row ->
+        Enum.map(headers, fn header ->
+          row
+          |> Map.get(header, "")
+          |> markdown_table_value()
+        end)
+      end)
+
+    [headers, separator | body]
+    |> Enum.map_join("\n", fn cells -> "| " <> Enum.join(cells, " | ") <> " |" end)
+  end
+
+  defp markdown_table_value(value) when is_binary(value) do
+    value
+    |> String.replace("\n", " ")
+    |> String.replace("|", "\\|")
+  end
+
+  defp markdown_table_value(value) when is_number(value) or is_boolean(value),
+    do: to_string(value)
+
+  defp markdown_table_value(nil), do: ""
+  defp markdown_table_value(value), do: value |> Jason.encode!() |> String.replace("|", "\\|")
 
   def search(%Notebook{id: notebook_id} = notebook, query, opts \\ []) do
     limit = opts |> Keyword.get(:limit, 6) |> clamp_limit()
@@ -705,14 +965,35 @@ defmodule Notex.Notebooks do
        title: "Mind map",
        request: "Create a mind map from the checked sources.",
        prompt: """
-       Create a text mind map from the evidence.
+       Create a Mermaid mind map from the evidence.
        Requirements:
-       - Format the output as Markdown.
-       - Use an indented hierarchy.
+       - Format the output as Markdown with a single ```mermaid fenced code block.
+       - Use Mermaid mindmap syntax.
        - Start with one central topic.
        - Add 3-5 major branches with concise child nodes.
        - Cite factual nodes with bracket citations.
        - Use only the evidence.
+       """
+     }}
+  end
+
+  defp studio_spec("infographic") do
+    {:ok,
+     %{
+       type: "infographic",
+       title: "InfoGraphic",
+       request: "Create an infographic from the checked sources.",
+       generator: :image,
+       prompt: """
+       Create a polished editorial infographic from the evidence.
+       Requirements:
+       - Use a horizontal landscape canvas, preferably 16:9 or similarly wide.
+       - Arrange content left-to-right or in a wide dashboard layout; do not make a vertical poster.
+       - Use a clean information-design layout, not a decorative poster.
+       - Include one clear title, 3-5 concise visual sections, and source-grounded labels.
+       - Prioritize legible typography, simple charts, callouts, and visual hierarchy.
+       - Do not invent facts beyond the evidence.
+       - Avoid tiny dense text; keep wording short and readable.
        """
      }}
   end
@@ -837,12 +1118,10 @@ defmodule Notex.Notebooks do
   end
 
   defp read_studio_messages(notebook_id) do
-    outputs_dir()
-    |> Path.join("*/*.json")
-    |> Path.wildcard()
+    studio_output_paths()
     |> Enum.reject(&(Path.basename(&1) == @chat_messages_file))
     |> Enum.flat_map(fn path ->
-      case read_json_file(path) do
+      case read_studio_output(path) do
         {:ok, data} ->
           id = data |> Map.get("id") |> normalize_id()
           inserted_at = parse_datetime(Map.get(data, "inserted_at"))
@@ -875,8 +1154,54 @@ defmodule Notex.Notebooks do
     ensure_storage!()
     type_dir = Path.join(outputs_dir(), data.type)
     File.mkdir_p!(type_dir)
-    path = Path.join(type_dir, "#{format_id(data.id)}-#{data.type}.json")
-    File.write!(path, Jason.encode!(data_to_json(data), pretty: true))
+
+    path =
+      Path.join(
+        type_dir,
+        "#{format_id(data.id)}-#{data.type}.#{studio_output_extension(data.type)}"
+      )
+
+    if studio_output_markdown?(data.type) do
+      File.write!(path, studio_output_markdown(data))
+    else
+      File.write!(path, Jason.encode!(data_to_json(data), pretty: true))
+    end
+  end
+
+  defp read_studio_output(path) do
+    case Path.extname(path) do
+      ".md" -> read_studio_markdown_file(path)
+      _ext -> read_json_file(path)
+    end
+  end
+
+  defp read_studio_markdown_file(path) do
+    with {:ok, body} <- File.read(path),
+         [metadata_json, content] <-
+           Regex.run(~r/\A<!--\s*notex-studio:\s*(.*?)\s*-->\s*(.*)\z/s, body,
+             capture: :all_but_first
+           ),
+         {:ok, metadata} <- Jason.decode(metadata_json) do
+      content = normalize_studio_answer(Map.get(metadata, "type"), content)
+      {:ok, Map.put(metadata, "content", content)}
+    else
+      _error -> {:error, :invalid_markdown_studio_output}
+    end
+  end
+
+  defp studio_output_markdown?(type), do: type in ["data-table", "mind-map"]
+
+  defp studio_output_extension(type),
+    do: if(studio_output_markdown?(type), do: "md", else: "json")
+
+  defp studio_output_markdown(data) do
+    metadata =
+      data
+      |> data_to_json()
+      |> Map.delete(:content)
+      |> Map.delete("content")
+
+    "<!-- notex-studio: #{Jason.encode!(metadata)} -->\n#{data.content}"
   end
 
   defp source_to_json(%Source{} = source) do
@@ -956,18 +1281,27 @@ defmodule Notex.Notebooks do
       |> Enum.map(&(Map.get(&1, "id") |> normalize_id()))
 
     studio_ids =
-      outputs_dir()
-      |> Path.join("*/*.json")
-      |> Path.wildcard()
-      |> Enum.map(fn path ->
-        path
-        |> Path.basename(".json")
-        |> String.split("-", parts: 2)
-        |> List.first()
-        |> normalize_id()
-      end)
+      studio_output_paths()
+      |> Enum.map(&studio_output_id_from_path/1)
 
     chat_ids ++ studio_ids
+  end
+
+  defp studio_output_paths do
+    ["*.json", "*.md"]
+    |> Enum.flat_map(fn pattern ->
+      outputs_dir()
+      |> Path.join("*/#{pattern}")
+      |> Path.wildcard()
+    end)
+  end
+
+  defp studio_output_id_from_path(path) do
+    path
+    |> Path.basename(Path.extname(path))
+    |> String.split("-", parts: 2)
+    |> List.first()
+    |> normalize_id()
   end
 
   defp next_message_id(extra_ids \\ []) do
@@ -1093,6 +1427,7 @@ defmodule Notex.Notebooks do
   end
 
   defp project_dir(slug), do: Path.join(projects_dir(), slug)
+  defp project_metadata_path(slug), do: Path.join(project_dir(slug), @project_metadata_file)
 
   defp project_metadata do
     case Application.get_env(:notex, @active_project_key) do
@@ -1140,6 +1475,9 @@ defmodule Notex.Notebooks do
       is_binary(preferred_name) and String.trim(preferred_name) != "" ->
         normalize_project_name(preferred_name)
 
+      is_binary(project_name_from_metadata(project_slug)) ->
+        project_name_from_metadata(project_slug)
+
       project_slug == "" ->
         @default_title
 
@@ -1153,6 +1491,24 @@ defmodule Notex.Notebooks do
         end)
         |> normalize_project_name()
     end
+  end
+
+  defp project_name_from_metadata(project_slug) do
+    with {:ok, data} <- read_json_file(project_metadata_path(project_slug)),
+         name when is_binary(name) and name != "" <- Map.get(data, "name") do
+      normalize_project_name(name)
+    else
+      _error -> nil
+    end
+  end
+
+  defp write_project_metadata(%{name: name, slug: slug}) do
+    File.mkdir_p!(project_dir(slug))
+
+    File.write!(
+      project_metadata_path(slug),
+      Jason.encode!(%{"name" => normalize_project_name(name), "slug" => slug}, pretty: true)
+    )
   end
 
   defp unique_project_name(base_name, allowed_slug \\ nil) do

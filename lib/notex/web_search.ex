@@ -624,7 +624,9 @@ defmodule Notex.WebSearch do
   defp html_snippet(item) do
     case Regex.run(
            ~r/<div[^>]*class="[^"]*\bb_caption\b[^"]*"[^>]*>(?<caption>.*?)<\/div>/isu,
-           item, capture: :all_names) do
+           item,
+           capture: :all_names
+         ) do
       [caption] -> caption
       _none -> ""
     end

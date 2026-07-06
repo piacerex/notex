@@ -6,6 +6,7 @@ defmodule NotexWeb.NotebookLiveTest do
   setup do
     old_config = Application.get_env(:notex, Notex.LLM)
     old_web_search_config = Application.get_env(:notex, Notex.WebSearch)
+    old_image_config = Application.get_env(:notex, Notex.ImageGeneration)
 
     Application.put_env(
       :notex,
@@ -23,6 +24,12 @@ defmodule NotexWeb.NotebookLiveTest do
       else
         Application.delete_env(:notex, Notex.WebSearch)
       end
+
+      if old_image_config do
+        Application.put_env(:notex, Notex.ImageGeneration, old_image_config)
+      else
+        Application.delete_env(:notex, Notex.ImageGeneration)
+      end
     end)
   end
 
@@ -33,6 +40,10 @@ defmodule NotexWeb.NotebookLiveTest do
     assert has_element?(view, "#question-form")
     assert has_element?(view, "h2", "Chat & MCP result")
     assert has_element?(view, "#mcp-panel")
+    assert has_element?(view, "header", "GPT on")
+    assert has_element?(view, "header", "stub")
+    assert has_element?(view, "#mcp-panel", "POST /mcp")
+    refute has_element?(view, "#mcp-panel", "Endpoint")
 
     view
     |> element("#source-form")
@@ -342,6 +353,7 @@ defmodule NotexWeb.NotebookLiveTest do
 
     assert has_element?(view, "#project-name-form")
     assert has_element?(view, "#create-project-button")
+    assert has_element?(view, "#delete-project-button")
     assert has_element?(view, "#project-select")
 
     view
@@ -370,6 +382,23 @@ defmodule NotexWeb.NotebookLiveTest do
     |> render_change(%{project: %{slug: "newpj"}})
 
     assert has_element?(view, "#project-name-form input[value='NewPJ']")
+  end
+
+  test "deletes the active project from the top bar", %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/")
+
+    view
+    |> element("#create-project-button")
+    |> render_click()
+
+    assert has_element?(view, "#project-name-form input[value='NewPJ 2']")
+
+    view
+    |> element("#delete-project-button")
+    |> render_click()
+
+    assert has_element?(view, "#project-name-form input[value='NewPJ']")
+    refute has_element?(view, "#project-select option", "NewPJ 2")
   end
 
   test "searches the web and imports checked results", %{conn: conn} do
@@ -761,13 +790,14 @@ defmodule NotexWeb.NotebookLiveTest do
 
     {:ok, view, _html} = live(conn, ~p"/")
 
-    for artifact <- ~w(audio_overview report quiz flashcards data_table mind_map) do
+    for artifact <- ~w(audio_overview report quiz flashcards data_table mind_map infographic) do
       assert has_element?(view, "[phx-value-artifact='#{artifact}']")
     end
 
     assert render(view) =~ "sm:grid-cols-3"
     assert has_element?(view, "#studio-action-data-table", "DataTable")
     assert has_element?(view, "#studio-action-mind-map", "MindMap")
+    assert has_element?(view, "#studio-action-infographic", "InfoGraphic")
 
     view
     |> element("[phx-value-artifact='flashcards']")
@@ -820,6 +850,7 @@ defmodule NotexWeb.NotebookLiveTest do
     assert has_element?(view, "#studio-output-modal")
     assert has_element?(view, "#studio-player", "Stubbed LLM answer")
     assert has_element?(view, "#studio-player .studio-markdown")
+    assert has_element?(view, "#studio-player [phx-hook='MermaidRenderer'][phx-update='ignore']")
     refute has_element?(view, "#studio-player pre")
     assert has_element?(view, "[id^='play-studio-output-']")
     assert has_element?(view, "[id^='delete-active-studio-output-']")
@@ -833,6 +864,54 @@ defmodule NotexWeb.NotebookLiveTest do
     |> render_click()
 
     refute has_element?(view, "#studio-output-modal")
+  end
+
+  test "infographic studio output opens as an image", %{conn: conn} do
+    image_base64 = Base.encode64("fake png")
+
+    Application.put_env(:notex, Notex.ImageGeneration,
+      model: "gpt-5.5",
+      reasoning_effort: "low",
+      app_server: fn prompt, config ->
+        assert config.model == "gpt-5.5"
+        assert config.reasoning_effort == "low"
+        assert prompt =~ "Create a polished editorial infographic"
+        assert prompt =~ "horizontal landscape canvas"
+        assert prompt =~ "do not make a vertical poster"
+
+        {:ok, image_base64, %{"revised_prompt" => "test infographic prompt"}}
+      end
+    )
+
+    notebook = Notex.Notebooks.get_default_notebook()
+
+    {:ok, _source} =
+      Notex.Notebooks.add_source(notebook, %{
+        title: "Graphic source",
+        body: "Graphic source content can become an infographic."
+      })
+
+    {:ok, view, _html} = live(conn, ~p"/")
+
+    view
+    |> element("#studio-action-infographic")
+    |> render_click()
+
+    wait_for_message_count(notebook, 2)
+    assert render(view) =~ "InfoGraphic"
+
+    view
+    |> element("#studio-output-list [phx-click='open_studio_output']")
+    |> render_click()
+
+    assert has_element?(view, "#studio-output-modal")
+
+    assert has_element?(
+             view,
+             "[id^='studio-image-'][src='data:image/png;base64,#{image_base64}']"
+           )
+
+    refute has_element?(view, "#studio-player .studio-markdown")
   end
 
   test "studio output list omits time and can delete media", %{conn: conn} do

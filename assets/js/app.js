@@ -26,6 +26,44 @@ import {hooks as colocatedHooks} from "phoenix-colocated/notex"
 import topbar from "../vendor/topbar"
 
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
+let mermaidClient = null
+
+const loadMermaid = async () => {
+  if (mermaidClient) return mermaidClient
+
+  const mermaidModule = await import("../vendor/mermaid.min.js")
+
+  mermaidClient = [mermaidModule.default, mermaidModule.mermaid, globalThis.mermaid]
+    .find(candidate =>
+      candidate &&
+      typeof candidate.initialize === "function" &&
+      typeof candidate.render === "function"
+    )
+
+  if (!mermaidClient) throw new Error("Mermaid failed to load")
+
+  mermaidClient.initialize({
+    startOnLoad: false,
+    securityLevel: "strict",
+    theme: "default",
+  })
+
+  return mermaidClient
+}
+
+const sanitizeMermaidMindmap = source => {
+  const lines = source.split("\n")
+
+  return lines.map(line => {
+    const trimmed = line.trim()
+    if (trimmed === "" || trimmed === "mindmap") return line
+
+    return line
+      .replace(/\s*\[[^\]]+\]/g, "")
+      .replace(/[<>{}[\]|`"]/g, "")
+  }).join("\n")
+}
+
 const Hooks = {
   ChatScroll: {
     mounted() {
@@ -58,6 +96,55 @@ const Hooks = {
     destroyed() {
       this.el.removeEventListener("click", this.handleClick)
       if ("speechSynthesis" in window) window.speechSynthesis.cancel()
+    },
+  },
+  MermaidRenderer: {
+    mounted() {
+      this.renderMermaid()
+    },
+    updated() {
+      this.renderMermaid()
+    },
+    async renderMermaid() {
+      const blocks = this.el.querySelectorAll(
+        "pre > code.language-mermaid, pre > code.mermaid, pre > code[class*='language-mermaid']"
+      )
+      if (blocks.length === 0) return
+
+      let mermaid
+
+      try {
+        mermaid = await loadMermaid()
+      } catch (_error) {
+        for (const block of blocks) {
+          block.parentElement?.classList.add("studio-mermaid-error")
+        }
+
+        return
+      }
+
+      for (const block of blocks) {
+        const pre = block.parentElement
+        if (!pre || pre.dataset.mermaidRendered === "true") continue
+
+        const rawSource = block.textContent || ""
+        const source = rawSource.trimStart().startsWith("mindmap")
+          ? sanitizeMermaidMindmap(rawSource)
+          : rawSource
+        const container = document.createElement("div")
+        const id = `mermaid-${this.el.id}-${Math.random().toString(36).slice(2)}`
+
+        container.className = "studio-mermaid"
+
+        try {
+          const {svg} = await mermaid.render(id, source)
+          container.innerHTML = svg
+          pre.replaceWith(container)
+        } catch (_error) {
+          pre.dataset.mermaidRendered = "true"
+          pre.classList.add("studio-mermaid-error")
+        }
+      }
     },
   },
 }

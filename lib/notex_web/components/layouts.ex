@@ -34,6 +34,7 @@ defmodule NotexWeb.Layouts do
   attr :notebook, :map, default: nil, doc: "optional notebook metadata for the app header"
   attr :projects, :list, default: []
   attr :project_name_form, :map, default: nil
+  attr :llm_status, :map, default: nil
 
   slot :inner_block, required: true
 
@@ -98,6 +99,18 @@ defmodule NotexWeb.Layouts do
               >
                 <.icon name="hero-plus" class="size-4" />
               </button>
+              <button
+                :if={@project_name_form}
+                id="delete-project-button"
+                type="button"
+                phx-click="delete_project"
+                data-confirm="Delete this project?"
+                class="inline-flex h-8 w-8 items-center justify-center rounded-md border border-zinc-200 text-zinc-600 transition hover:border-rose-300 hover:bg-rose-50 hover:text-rose-700"
+                title="Delete project"
+                aria-label="Delete project"
+              >
+                <.icon name="hero-trash" class="size-4" />
+              </button>
             </div>
             <h1 :if={!@project_name_form} class="truncate text-lg font-semibold text-zinc-950">
               {@notebook.title}
@@ -106,6 +119,29 @@ defmodule NotexWeb.Layouts do
         </div>
         <div class="flex-none">
           <ul class="flex items-center gap-2">
+            <li :if={@llm_status}>
+              <div class="hidden items-center gap-2 rounded-full border border-zinc-200 bg-zinc-50 px-2 py-1 text-xs text-zinc-600 sm:inline-flex">
+                <span class={[
+                  "inline-flex items-center gap-1 rounded-full px-2 py-0.5 font-medium",
+                  @llm_status.configured? &&
+                    "bg-emerald-50 text-emerald-800 ring-1 ring-emerald-200",
+                  !@llm_status.configured? && "bg-amber-50 text-amber-800 ring-1 ring-amber-200"
+                ]}>
+                  <.icon
+                    name={
+                      if(@llm_status.configured?,
+                        do: "hero-bolt",
+                        else: "hero-exclamation-triangle"
+                      )
+                    }
+                    class="size-3.5"
+                  />
+                  {if(@llm_status.configured?, do: "GPT on", else: "Unavailable")}
+                </span>
+                <span class="font-mono">{@llm_status.model}</span>
+                <span>effort {@llm_status.reasoning_effort}</span>
+              </div>
+            </li>
             <li>
               <a
                 href="/mcp"

@@ -15,6 +15,10 @@ config :notex, Notex.LLM,
   model: "gpt-5.5",
   reasoning_effort: "low"
 
+config :notex, Notex.ImageGeneration,
+  model: "gpt-5.5",
+  reasoning_effort: "low"
+
 # Configure the endpoint
 config :notex, NotexWeb.Endpoint,
   url: [host: "localhost"],

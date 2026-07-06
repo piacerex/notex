@@ -67,6 +67,12 @@ defmodule NotexWeb.NotebookLive do
     {:noreply, socket}
   end
 
+  def handle_event("delete_project", _params, socket) do
+    {:ok, notebook} = Notebooks.delete_project()
+    socket = socket |> load_project(notebook) |> put_flash(:info, "Project deleted.")
+    {:noreply, socket}
+  end
+
   def handle_event("select_project", %{"project" => %{"slug" => slug}}, socket) do
     case Notebooks.select_project(slug) do
       {:ok, notebook} ->
@@ -584,6 +590,10 @@ defmodule NotexWeb.NotebookLive do
       {:error, {:llm_unavailable, _reason}} ->
         {:noreply, put_flash(socket, :error, "Studio unavailable.")}
 
+      {:error, {:image_unavailable, reason}} ->
+        {:noreply,
+         put_flash(socket, :error, "Image generation failed: #{format_image_reason(reason)}")}
+
       {:error, :unknown_studio_artifact} ->
         {:noreply, put_flash(socket, :error, "Unknown Studio action.")}
 
@@ -860,7 +870,18 @@ defmodule NotexWeb.NotebookLive do
       tone: "bg-fuchsia-50 text-fuchsia-950"
     }
 
+  defp studio_request_meta("Create an infographic" <> _rest),
+    do: %{
+      type: "image",
+      label: "InfoGraphic",
+      icon: "hero-photo",
+      tone: "bg-emerald-50 text-emerald-950"
+    }
+
   defp studio_request_meta(_request), do: nil
+
+  defp studio_output_title("data:image/" <> _rest, fallback), do: fallback
+  defp studio_output_title("```mermaid" <> _rest, fallback), do: fallback
 
   defp studio_output_title(content, fallback) when is_binary(content) do
     lines = String.split(content, "\n")
@@ -1270,6 +1291,7 @@ defmodule NotexWeb.NotebookLive do
   defp studio_label("flashcards"), do: "Flashcards"
   defp studio_label("data_table"), do: "Data Table"
   defp studio_label("mind_map"), do: "Mind Map"
+  defp studio_label("infographic"), do: "InfoGraphic"
   defp studio_label(_artifact), do: "artifact"
 
   defp message_tone("user"), do: "border-zinc-200 bg-zinc-100 text-zinc-950"
@@ -1281,4 +1303,19 @@ defmodule NotexWeb.NotebookLive do
   defp message_alignment(_role), do: "mr-auto"
 
   defp format_llm_reason(reason), do: inspect(reason)
+
+  defp format_image_reason({:missing_executable, command}) do
+    "Codex command #{inspect(command)} was not found."
+  end
+
+  defp format_image_reason({:image_generation_not_supported, _capabilities}) do
+    "Codex app-server does not advertise image generation."
+  end
+
+  defp format_image_reason({:missing_image_generation_result, _meta}) do
+    "Codex app-server completed without an image result."
+  end
+
+  defp format_image_reason(:timeout), do: "Codex app-server timed out."
+  defp format_image_reason(reason), do: inspect(reason)
 end

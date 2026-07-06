@@ -177,6 +177,25 @@
   padding: 0.75rem;
 }
 
+.studio-mermaid {
+  margin-top: 0.75rem;
+  overflow-x: auto;
+  border-radius: 0.5rem;
+  border: 1px solid oklch(87% 0.006 286.286);
+  background-color: white;
+  padding: 1rem;
+}
+
+.studio-mermaid svg {
+  min-width: 100%;
+  height: auto;
+}
+
+.studio-mermaid-error {
+  border: 1px solid oklch(70.4% 0.191 22.216);
+  background-color: oklch(97.1% 0.013 17.38);
+}
+
 /* Add variants based on LiveView classes */
 @custom-variant phx-click-loading (.phx-click-loading&, .phx-click-loading &);
 @custom-variant phx-submit-loading (.phx-submit-loading&, .phx-submit-loading &);
@@ -245,6 +264,11 @@
 [data-theme="dark"] .studio-markdown code,
 [data-theme="dark"] .studio-markdown pre {
   background-color: #3f3f46;
+}
+
+[data-theme="dark"] .studio-mermaid {
+  border-color: #52525b;
+  background-color: #fafafa;
 }
 
 [data-theme="dark"] .text-zinc-600,

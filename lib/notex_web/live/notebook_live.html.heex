@@ -3,6 +3,7 @@
   notebook={@notebook}
   projects={@projects}
   project_name_form={@project_name_form}
+  llm_status={@llm_status}
 >
   <div class="w-full max-w-none px-3 py-3 sm:px-4 lg:px-5">
     <section
@@ -500,37 +501,9 @@
             <.icon name="hero-server-stack" class="size-5 text-zinc-700" />
             <h2 class="text-sm font-semibold text-zinc-950">Embedded MCP</h2>
           </div>
-          <dl class="mt-4 space-y-3 text-sm">
-            <div>
-              <dd class="mt-1 flex flex-wrap items-center gap-2 text-zinc-700">
-                <span class={[
-                  "inline-flex items-center gap-1 rounded-full px-2 py-1 text-xs font-medium",
-                  @llm_status.configured? &&
-                    "bg-emerald-50 text-emerald-800 ring-1 ring-emerald-200",
-                  !@llm_status.configured? && "bg-amber-50 text-amber-800 ring-1 ring-amber-200"
-                ]}>
-                  <.icon
-                    name={
-                      if(@llm_status.configured?,
-                        do: "hero-bolt",
-                        else: "hero-exclamation-triangle"
-                      )
-                    }
-                    class="size-3.5"
-                  />
-                  {if(@llm_status.configured?, do: "GPT on", else: "Unavailable")}
-                </span>
-                <span class="font-mono text-xs">{@llm_status.model}</span>
-                <span class="text-xs">effort {@llm_status.reasoning_effort}</span>
-              </dd>
-            </div>
-            <div>
-              <dt class="text-xs uppercase tracking-[0.16em] text-zinc-500">Endpoint</dt>
-              <dd class="mt-1 rounded-md bg-zinc-100 px-2 py-1 font-mono text-xs text-zinc-800">
-                POST /mcp
-              </dd>
-            </div>
-          </dl>
+          <div class="mt-4 rounded-md bg-zinc-100 px-2 py-1 font-mono text-xs text-zinc-800">
+            POST /mcp
+          </div>
           <.form
             for={@mcp_form}
             id="mcp-execute-form"
@@ -780,6 +753,28 @@
                 class="size-3.5 shrink-0 opacity-60"
               />
             </button>
+            <button
+              id="studio-action-infographic"
+              type="button"
+              phx-click="generate_studio"
+              phx-value-artifact="infographic"
+              class="flex h-10 min-w-0 items-center justify-between gap-1 rounded-lg bg-emerald-50 px-1.5 text-left text-[11px] font-semibold text-emerald-950 transition hover:bg-emerald-100 phx-click-loading:opacity-70 phx-click-loading:ring-2 phx-click-loading:ring-emerald-300"
+            >
+              <span class="inline-flex min-w-0 items-center gap-1">
+                <.icon name="hero-photo" class="size-4 shrink-0" />
+                <span class="whitespace-nowrap">InfoGraphic</span>
+              </span>
+              <.icon
+                :if={studio_generating?(@generating_studio_artifacts, "infographic")}
+                name="hero-arrow-path"
+                class="size-4 shrink-0 animate-spin"
+              />
+              <.icon
+                :if={!studio_generating?(@generating_studio_artifacts, "infographic")}
+                name="hero-chevron-right"
+                class="size-3.5 shrink-0 opacity-60"
+              />
+            </button>
           </div>
 
           <div class="mt-4 flex min-h-0 flex-1 flex-col rounded-lg bg-zinc-50 p-3">
@@ -904,7 +899,21 @@
             <.icon name="hero-play" class="size-4" /> Play audio
           </button>
 
-          <div class="studio-markdown rounded-md bg-zinc-50 p-4 text-sm leading-6 text-zinc-800">
+          <img
+            :if={@active_studio_output.type == "image"}
+            id={"studio-image-#{@active_studio_output.id}"}
+            src={@active_studio_output.content}
+            alt={@active_studio_output.title}
+            class="mx-auto max-h-[68vh] w-auto max-w-full rounded-lg border border-zinc-200 bg-white object-contain shadow-sm"
+          />
+
+          <div
+            :if={@active_studio_output.type != "image"}
+            id={"studio-markdown-#{@active_studio_output.id}"}
+            phx-hook="MermaidRenderer"
+            phx-update="ignore"
+            class="studio-markdown rounded-md bg-zinc-50 p-4 text-sm leading-6 text-zinc-800"
+          >
             {markdown_html(@active_studio_output.content)}
           </div>
         </div>
