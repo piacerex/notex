@@ -2,6 +2,7 @@ defmodule NotexWeb.NotebookLive do
   use NotexWeb, :live_view
 
   alias Notex.{Notebooks, WebSearch}
+
   alias Notex.MCP.Server, as: MCPServer
   alias Notex.Notebooks.Message
 
@@ -40,8 +41,12 @@ defmodule NotexWeb.NotebookLive do
       |> assign(:asking, false)
       |> assign(:studio_outputs, studio_outputs(messages))
       |> assign(:active_studio_output, nil)
+      |> assign(:active_studio_settings_artifact, nil)
+      |> assign(:active_flashcard_index, 0)
+      |> assign(:active_flashcard_answer?, false)
       |> assign(:active_source_position, nil)
       |> assign(:generating_studio_artifacts, MapSet.new())
+      |> assign(:studio_generation_tasks, %{})
       |> assign(:streaming_assistant_content, %{})
       |> stream_configure(:messages, dom_id: &message_dom_id/1)
       |> stream_messages(chat_messages, reset: true)
@@ -352,34 +357,100 @@ defmodule NotexWeb.NotebookLive do
   end
 
   def handle_event("generate_studio", %{"artifact" => artifact}, socket) do
-    if socket.assigns.selected_source_ids == [] do
-      {:noreply, put_flash(socket, :error, "Select a source.")}
-    else
-      parent = self()
-      notebook = socket.assigns.notebook
-      source_ids = socket.assigns.selected_source_ids
+    cond do
+      Map.has_key?(socket.assigns.studio_generation_tasks, artifact) ->
+        {:noreply, stop_studio_generation(socket, artifact)}
 
-      Task.start(fn ->
-        result = Notebooks.generate_studio_artifact(notebook, artifact, source_ids: source_ids)
-        send(parent, {:studio_generation_completed, artifact, result})
-      end)
+      socket.assigns.selected_source_ids == [] ->
+        {:noreply, put_flash(socket, :error, "Select a source.")}
 
-      {:noreply,
-       assign(
-         socket,
-         :generating_studio_artifacts,
-         MapSet.put(socket.assigns.generating_studio_artifacts, artifact)
-       )}
+      true ->
+        parent = self()
+        notebook = socket.assigns.notebook
+        source_ids = socket.assigns.selected_source_ids
+
+        {:ok, pid} =
+          Task.start(fn ->
+            result =
+              Notebooks.generate_studio_artifact(notebook, artifact, source_ids: source_ids)
+
+            send(parent, {:studio_generation_completed, notebook, artifact, result})
+          end)
+
+        {:noreply,
+         socket
+         |> assign(
+           :generating_studio_artifacts,
+           MapSet.put(socket.assigns.generating_studio_artifacts, artifact)
+         )
+         |> assign(
+           :studio_generation_tasks,
+           Map.put(socket.assigns.studio_generation_tasks, artifact, pid)
+         )}
     end
+  end
+
+  def handle_event("open_studio_settings", %{"artifact" => artifact}, socket) do
+    {:noreply, assign(socket, :active_studio_settings_artifact, artifact)}
+  end
+
+  def handle_event("close_studio_settings", _params, socket) do
+    {:noreply, assign(socket, :active_studio_settings_artifact, nil)}
+  end
+
+  def handle_event("generate_studio_from_settings", %{"artifact" => artifact}, socket) do
+    socket = assign(socket, :active_studio_settings_artifact, nil)
+    handle_event("generate_studio", %{"artifact" => artifact}, socket)
   end
 
   def handle_event("open_studio_output", %{"id" => id}, socket) do
     output = Enum.find(socket.assigns.studio_outputs, &(to_string(&1.id) == id))
-    {:noreply, assign(socket, :active_studio_output, output)}
+
+    {:noreply,
+     socket
+     |> assign(:active_studio_output, output)
+     |> assign(:active_flashcard_index, 0)
+     |> assign(:active_flashcard_answer?, false)}
   end
 
   def handle_event("close_studio_output", _params, socket) do
     {:noreply, assign(socket, :active_studio_output, nil)}
+  end
+
+  def handle_event("show_flashcard_answer", _params, socket) do
+    {:noreply, assign(socket, :active_flashcard_answer?, true)}
+  end
+
+  def handle_event("previous_flashcard", _params, socket) do
+    count = flashcard_count(socket.assigns.active_studio_output)
+
+    index =
+      if count > 0 do
+        rem(socket.assigns.active_flashcard_index - 1 + count, count)
+      else
+        0
+      end
+
+    {:noreply,
+     socket
+     |> assign(:active_flashcard_index, index)
+     |> assign(:active_flashcard_answer?, false)}
+  end
+
+  def handle_event("next_flashcard", _params, socket) do
+    count = flashcard_count(socket.assigns.active_studio_output)
+
+    index =
+      if count > 0 do
+        rem(socket.assigns.active_flashcard_index + 1, count)
+      else
+        0
+      end
+
+    {:noreply,
+     socket
+     |> assign(:active_flashcard_index, index)
+     |> assign(:active_flashcard_answer?, false)}
   end
 
   def handle_event("delete_studio_output", %{"id" => id}, socket) do
@@ -407,6 +478,24 @@ defmodule NotexWeb.NotebookLive do
       {:error, :not_found} ->
         {:noreply, put_flash(socket, :error, "Studio output not found.")}
     end
+  end
+
+  defp stop_studio_generation(socket, artifact) do
+    case Map.fetch(socket.assigns.studio_generation_tasks, artifact) do
+      {:ok, pid} -> Process.exit(pid, :kill)
+      :error -> :ok
+    end
+
+    socket
+    |> assign(
+      :generating_studio_artifacts,
+      MapSet.delete(socket.assigns.generating_studio_artifacts, artifact)
+    )
+    |> assign(
+      :studio_generation_tasks,
+      Map.delete(socket.assigns.studio_generation_tasks, artifact)
+    )
+    |> put_flash(:info, "#{studio_label(artifact)} generation stopped.")
   end
 
   defp ask(socket, question) do
@@ -563,43 +652,16 @@ defmodule NotexWeb.NotebookLive do
      |> put_flash(:error, "MCP result was empty.")}
   end
 
-  def handle_info({:studio_generation_completed, artifact, result}, socket) do
-    socket =
-      assign(
-        socket,
-        :generating_studio_artifacts,
-        MapSet.delete(socket.assigns.generating_studio_artifacts, artifact)
-      )
-
-    case result do
-      {:ok, _result} ->
-        messages = Notebooks.list_messages(socket.assigns.notebook)
-        studio_outputs = studio_outputs(messages)
-
-        socket =
-          socket
-          |> assign(:studio_outputs, studio_outputs)
-          |> assign(:active_studio_output, nil)
-          |> put_flash(:info, "Studio generated #{studio_label(artifact)}.")
-
-        {:noreply, socket}
-
-      {:error, :no_evidence} ->
-        {:noreply, put_flash(socket, :error, "Select a source.")}
-
-      {:error, {:llm_unavailable, _reason}} ->
-        {:noreply, put_flash(socket, :error, "Studio unavailable.")}
-
-      {:error, {:image_unavailable, reason}} ->
-        {:noreply,
-         put_flash(socket, :error, "Image generation failed: #{format_image_reason(reason)}")}
-
-      {:error, :unknown_studio_artifact} ->
-        {:noreply, put_flash(socket, :error, "Unknown Studio action.")}
-
-      {:error, _changeset} ->
-        {:noreply, put_flash(socket, :error, "Studio failed.")}
+  def handle_info({:studio_generation_completed, notebook, artifact, result}, socket) do
+    if not Map.has_key?(socket.assigns.studio_generation_tasks, artifact) do
+      {:noreply, socket}
+    else
+      handle_studio_generation_completed(socket, notebook, artifact, result)
     end
+  end
+
+  def handle_info({:studio_generation_completed, artifact, result}, socket) do
+    handle_info({:studio_generation_completed, socket.assigns.notebook, artifact, result}, socket)
   end
 
   def handle_info({:chat_delta, assistant_id, delta}, socket) do
@@ -689,6 +751,55 @@ defmodule NotexWeb.NotebookLive do
     {:noreply, socket}
   end
 
+  defp handle_studio_generation_completed(socket, notebook, artifact, result) do
+    socket =
+      socket
+      |> assign(
+        :generating_studio_artifacts,
+        MapSet.delete(socket.assigns.generating_studio_artifacts, artifact)
+      )
+      |> assign(
+        :studio_generation_tasks,
+        Map.delete(socket.assigns.studio_generation_tasks, artifact)
+      )
+
+    case result do
+      {:ok, result} ->
+        studio_outputs =
+          socket.assigns.notebook
+          |> refresh_studio_outputs(result, artifact, notebook)
+          |> ensure_generated_studio_output(socket.assigns.notebook, notebook, artifact, result)
+
+        socket =
+          socket
+          |> assign(:studio_outputs, studio_outputs)
+          |> assign(:active_studio_output, nil)
+          |> put_flash(:info, "Studio generated #{studio_label(artifact)}.")
+
+        {:noreply, socket}
+
+      {:error, :no_evidence} ->
+        {:noreply, put_flash(socket, :error, "Select a source.")}
+
+      {:error, {:llm_unavailable, _reason}} ->
+        {:noreply, put_flash(socket, :error, "Studio unavailable.")}
+
+      {:error, {:image_unavailable, reason}} ->
+        {:noreply,
+         put_flash(socket, :error, "Image generation failed: #{format_image_reason(reason)}")}
+
+      {:error, {:video_unavailable, reason}} ->
+        {:noreply,
+         put_flash(socket, :error, "Video generation failed: #{format_video_reason(reason)}")}
+
+      {:error, :unknown_studio_artifact} ->
+        {:noreply, put_flash(socket, :error, "Unknown Studio action.")}
+
+      {:error, _changeset} ->
+        {:noreply, put_flash(socket, :error, "Studio failed.")}
+    end
+  end
+
   defp ordered_citations(message) do
     message.citations
     |> Enum.sort_by(fn {key, _value} -> String.to_integer(key) end)
@@ -703,6 +814,494 @@ defmodule NotexWeb.NotebookLive do
   end
 
   defp markdown_html(_markdown), do: Phoenix.HTML.raw("")
+
+  defp favicon_src(url) when is_binary(url) do
+    case URI.parse(url) do
+      %URI{scheme: scheme, host: host} when scheme in ["http", "https"] and is_binary(host) ->
+        "https://www.google.com/s2/favicons?domain=#{URI.encode(host)}&sz=64"
+
+      _ ->
+        nil
+    end
+  end
+
+  defp favicon_src(_url), do: nil
+
+  defp source_favicon_src(%{body: body}) when is_binary(body) do
+    body
+    |> source_url()
+    |> favicon_src()
+  end
+
+  defp source_favicon_src(_source), do: nil
+
+  defp source_url(body) do
+    case Regex.run(~r/https?:\/\/[^\s<>)"']+/, body) do
+      [url | _] -> String.trim_trailing(url, ".,;")
+      _ -> nil
+    end
+  end
+
+  defp slides_from_markdown(markdown) when is_binary(markdown) do
+    markdown
+    |> String.split(~r/^\s*---\s*$/m)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> case do
+      [] -> [markdown]
+      slides -> slides
+    end
+  end
+
+  defp slides_from_markdown(_markdown), do: []
+
+  defp studio_slides(%{type: "cards", content: content}), do: cards_from_markdown(content)
+  defp studio_slides(%{content: content}), do: slides_from_markdown(content)
+  defp studio_slides(_output), do: []
+
+  defp slide_image_src(slide, index) do
+    variant = slide_variant_for_slide(slide, index)
+
+    encoded =
+      slide
+      |> slide_svg(index, variant)
+      |> Base.encode64()
+
+    "data:image/svg+xml;base64,#{encoded}"
+  end
+
+  defp slide_svg(slide, index, variant) do
+    lines = slide_lines(slide)
+    title = slide_title(lines, index)
+    body = slide_body(lines)
+
+    body_nodes = slide_body_nodes(body, variant)
+
+    escaped_title = Phoenix.HTML.html_escape(title) |> Phoenix.HTML.safe_to_string()
+    decoration = slide_decoration(variant)
+    content = slide_content_panel(variant, escaped_title, body_nodes)
+
+    """
+    <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720">
+      <defs>
+        <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stop-color="#{variant.bg_a}"/>
+          <stop offset="56%" stop-color="#{variant.bg_b}"/>
+          <stop offset="100%" stop-color="#{variant.bg_c}"/>
+        </linearGradient>
+        <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+          <feDropShadow dx="0" dy="18" stdDeviation="18" flood-color="#0f172a" flood-opacity="0.15"/>
+        </filter>
+        <filter id="softShadow" x="-20%" y="-30%" width="140%" height="160%">
+          <feDropShadow dx="0" dy="8" stdDeviation="8" flood-color="#0f172a" flood-opacity="0.10"/>
+        </filter>
+        <style>
+          .eyebrow { font: 700 20px sans-serif; letter-spacing: 8px; fill: #64748b; }
+          .title { font: 800 54px sans-serif; fill: #2c2c36; }
+          .body { font: 600 24px sans-serif; fill: #27272a; }
+          .small { font: 700 18px sans-serif; fill: #475569; }
+          .metric { font: 900 44px sans-serif; fill: #2c2c36; }
+          .rail { font: 800 20px sans-serif; letter-spacing: 5px; fill: #ffffff; }
+        </style>
+      </defs>
+      <rect width="1280" height="720" rx="28" fill="url(#bg)"/>
+      <path d="M0 0h118v720H0z" fill="#{variant.rail}"/>
+      <text x="-650" y="72" transform="rotate(-90)" class="rail">SLIDE #{index}</text>
+      #{decoration}
+      #{content}
+    </svg>
+    """
+  end
+
+  defp slide_content_panel(
+         %{layout: :timeline, accent: accent, progress_width: progress},
+         title,
+         body_nodes
+       ) do
+    """
+    <path d="M172 96c0-18 14-32 32-32h824c18 0 32 14 32 32v520c0 18-14 32-32 32H204c-18 0-32-14-32-32z" fill="#ffffff" opacity="0.74" filter="url(#shadow)"/>
+    <rect x="204" y="104" width="118" height="12" rx="6" fill="#{accent}"/>
+    <text x="204" y="154" class="eyebrow">TIMELINE</text>
+    <text x="204" y="220" class="title">#{title}</text>
+    <path d="M224 260v328" stroke="#{accent}" stroke-width="12" stroke-linecap="round" opacity="0.14"/>
+    #{body_nodes}
+    <rect x="204" y="622" width="#{progress}" height="14" rx="7" fill="#{accent}"/>
+    """
+  end
+
+  defp slide_content_panel(
+         %{layout: :cards, accent: accent, progress_width: progress},
+         title,
+         body_nodes
+       ) do
+    """
+    <rect x="174" y="72" width="392" height="156" rx="34" fill="#ffffff" opacity="0.82" filter="url(#shadow)"/>
+    <rect x="596" y="72" width="460" height="156" rx="34" fill="#ffffff" opacity="0.52"/>
+    <text x="206" y="126" class="eyebrow">KEY CARDS</text>
+    <text x="206" y="190" class="title">#{title}</text>
+    <path d="M612 168h296" stroke="#{accent}" stroke-width="18" stroke-linecap="round" opacity="0.28"/>
+    <path d="M612 204h182" stroke="#2c2c36" stroke-width="10" stroke-linecap="round" opacity="0.10"/>
+    <rect x="176" y="244" width="842" height="360" rx="38" fill="#ffffff" opacity="0.42"/>
+    #{body_nodes}
+    <rect x="206" y="622" width="#{progress}" height="14" rx="7" fill="#{accent}"/>
+    """
+  end
+
+  defp slide_content_panel(
+         %{layout: :metrics, accent: accent, progress_width: progress},
+         title,
+         body_nodes
+       ) do
+    """
+    <rect x="172" y="78" width="312" height="548" rx="36" fill="#ffffff" opacity="0.80" filter="url(#shadow)"/>
+    <rect x="520" y="106" width="540" height="492" rx="42" fill="#ffffff" opacity="0.58"/>
+    <text x="212" y="148" class="eyebrow">DASHBOARD</text>
+    <text x="212" y="222" class="title">#{title}</text>
+    <circle cx="338" cy="420" r="86" fill="none" stroke="#{accent}" stroke-width="28" opacity="0.28"/>
+    <circle cx="338" cy="420" r="48" fill="#{accent}" opacity="0.16"/>
+    #{body_nodes}
+    <rect x="212" y="566" width="#{progress}" height="14" rx="7" fill="#{accent}"/>
+    """
+  end
+
+  defp slide_content_panel(
+         %{layout: :network, accent: accent, progress_width: progress},
+         title,
+         body_nodes
+       ) do
+    """
+    <path d="M176 134c88-72 214-74 302-4s190 72 300 10 224-42 286 40v410H176z" fill="#ffffff" opacity="0.60" filter="url(#shadow)"/>
+    <rect x="198" y="92" width="604" height="128" rx="34" fill="#ffffff" opacity="0.84"/>
+    <text x="230" y="142" class="eyebrow">RELATION MAP</text>
+    <text x="230" y="202" class="title">#{title}</text>
+    <circle cx="930" cy="158" r="56" fill="#{accent}" opacity="0.22"/>
+    <circle cx="1006" cy="218" r="30" fill="#2c2c36" opacity="0.08"/>
+    #{body_nodes}
+    <rect x="230" y="622" width="#{progress}" height="14" rx="7" fill="#{accent}"/>
+    """
+  end
+
+  defp slide_variant(index) do
+    variants = [
+      %{
+        bg_a: "#ffffff",
+        bg_b: "#f8fafc",
+        bg_c: "#ecfdf5",
+        rail: "#2c2c36",
+        accent: "#10b981",
+        progress_width: 196,
+        decoration: :rings,
+        layout: :timeline
+      },
+      %{
+        bg_a: "#f8fafc",
+        bg_b: "#eef2ff",
+        bg_c: "#f0fdfa",
+        rail: "#0f766e",
+        accent: "#0ea5e9",
+        progress_width: 300,
+        decoration: :steps,
+        layout: :cards
+      },
+      %{
+        bg_a: "#fff7ed",
+        bg_b: "#ffffff",
+        bg_c: "#fefce8",
+        rail: "#7c2d12",
+        accent: "#f97316",
+        progress_width: 260,
+        decoration: :bars,
+        layout: :metrics
+      },
+      %{
+        bg_a: "#fdf2f8",
+        bg_b: "#ffffff",
+        bg_c: "#eef2ff",
+        rail: "#581c87",
+        accent: "#a855f7",
+        progress_width: 340,
+        decoration: :nodes,
+        layout: :network
+      }
+    ]
+
+    Enum.at(variants, rem(index - 1, length(variants)))
+  end
+
+  defp slide_variant_for_slide(slide, index) do
+    chapter = slide_chapter_key(slide)
+    variant_index = :erlang.phash2(chapter, 4) + 1
+    slide_variant(variant_index || index)
+  end
+
+  defp slide_chapter_key(slide) do
+    slide
+    |> slide_lines()
+    |> slide_title(1)
+    |> String.downcase()
+    |> String.replace(~r/^\s*(?:chapter|section|part|第)?\s*\d+\s*[:：.\-]?\s*/u, "")
+    |> String.split(~r/[：:｜|\-—–]/u, parts: 2)
+    |> List.first()
+    |> to_string()
+    |> String.trim()
+    |> case do
+      "" -> "default"
+      key -> key
+    end
+  end
+
+  defp slide_decoration(%{decoration: :rings, accent: accent}) do
+    """
+    <circle cx="1110" cy="138" r="92" fill="#{accent}" opacity="0.18"/>
+    <circle cx="1180" cy="226" r="44" fill="#0ea5e9" opacity="0.16"/>
+    <circle cx="1074" cy="612" r="110" fill="none" stroke="#{accent}" stroke-width="24" opacity="0.10"/>
+    """
+  end
+
+  defp slide_decoration(%{decoration: :steps, accent: accent}) do
+    """
+    <rect x="1040" y="96" width="140" height="62" rx="22" fill="#{accent}" opacity="0.20"/>
+    <rect x="990" y="178" width="190" height="62" rx="22" fill="#{accent}" opacity="0.14"/>
+    <rect x="940" y="260" width="240" height="62" rx="22" fill="#{accent}" opacity="0.10"/>
+    <path d="M1018 574c58-72 128-72 210 0" fill="none" stroke="#{accent}" stroke-width="18" stroke-linecap="round" opacity="0.18"/>
+    """
+  end
+
+  defp slide_decoration(%{decoration: :bars, accent: accent}) do
+    """
+    <rect x="1044" y="110" width="38" height="360" rx="19" fill="#{accent}" opacity="0.16"/>
+    <rect x="1110" y="184" width="38" height="286" rx="19" fill="#{accent}" opacity="0.24"/>
+    <rect x="1176" y="252" width="38" height="218" rx="19" fill="#{accent}" opacity="0.14"/>
+    <circle cx="1130" cy="592" r="84" fill="#2c2c36" opacity="0.07"/>
+    """
+  end
+
+  defp slide_decoration(%{decoration: :nodes, accent: accent}) do
+    """
+    <path d="M1010 178 L1144 112 L1192 250 L1078 326 Z" fill="none" stroke="#{accent}" stroke-width="12" opacity="0.20"/>
+    <circle cx="1010" cy="178" r="28" fill="#{accent}" opacity="0.24"/>
+    <circle cx="1144" cy="112" r="22" fill="#{accent}" opacity="0.18"/>
+    <circle cx="1192" cy="250" r="34" fill="#{accent}" opacity="0.20"/>
+    <circle cx="1078" cy="326" r="24" fill="#{accent}" opacity="0.16"/>
+    <rect x="1008" y="536" width="180" height="52" rx="26" fill="#{accent}" opacity="0.16"/>
+    """
+  end
+
+  defp slide_body_nodes(body, %{layout: :timeline, accent: accent}) do
+    body
+    |> Enum.take(6)
+    |> Enum.with_index()
+    |> Enum.map_join("\n", fn {line, index} ->
+      y = 292 + index * 52
+      escaped = slide_label(line)
+
+      """
+      <g>
+        <line x1="232" y1="#{y - 34}" x2="232" y2="#{y + 22}" stroke="#{accent}" stroke-width="5" opacity="0.28"/>
+        <circle cx="232" cy="#{y - 6}" r="18" fill="#{accent}"/>
+        <text x="226" y="#{y}" class="small" fill="#ffffff">#{index + 1}</text>
+        <rect x="274" y="#{y - 34}" width="684" height="46" rx="18" fill="#ffffff" opacity="0.86" filter="url(#softShadow)"/>
+        <text x="300" y="#{y}" class="body">#{escaped}</text>
+      </g>
+      """
+    end)
+  end
+
+  defp slide_body_nodes(body, %{layout: :cards, accent: accent}) do
+    body
+    |> Enum.take(6)
+    |> Enum.with_index()
+    |> Enum.map_join("\n", fn {line, index} ->
+      x = 206 + rem(index, 2) * 396
+      y = 284 + div(index, 2) * 106
+      escaped = slide_label(line)
+
+      """
+      <g filter="url(#softShadow)">
+        <rect x="#{x}" y="#{y - 42}" width="348" height="78" rx="24" fill="#ffffff" opacity="0.88"/>
+        <path d="M#{x + 24} #{y + 36}h92" stroke="#{accent}" stroke-width="8" stroke-linecap="round"/>
+        <circle cx="#{x + 304}" cy="#{y - 4}" r="26" fill="#{accent}" opacity="0.18"/>
+        <text x="#{x + 26}" y="#{y}" class="body">#{escaped}</text>
+      </g>
+      """
+    end)
+  end
+
+  defp slide_body_nodes(body, %{layout: :metrics, accent: accent}) do
+    body
+    |> Enum.take(4)
+    |> Enum.with_index()
+    |> Enum.map_join("\n", fn {line, index} ->
+      x = 550 + rem(index, 2) * 250
+      y = 310 + div(index, 2) * 150
+      escaped = slide_label(line)
+      metric = String.pad_leading(Integer.to_string(index + 1), 2, "0")
+
+      """
+      <g filter="url(#softShadow)">
+        <rect x="#{x}" y="#{y - 76}" width="220" height="116" rx="30" fill="#ffffff" opacity="0.88"/>
+        <text x="#{x + 26}" y="#{y - 20}" class="metric">#{metric}</text>
+        <rect x="#{x + 26}" y="#{y + 8}" width="118" height="10" rx="5" fill="#{accent}"/>
+        <text x="#{x + 26}" y="#{y + 36}" class="small">#{escaped}</text>
+      </g>
+      """
+    end)
+  end
+
+  defp slide_body_nodes(body, %{layout: :network, accent: accent}) do
+    nodes =
+      [
+        {270, 322},
+        {478, 270},
+        {712, 332},
+        {366, 488},
+        {650, 500}
+      ]
+
+    lines =
+      body
+      |> Enum.take(length(nodes))
+      |> Enum.with_index()
+
+    connectors =
+      """
+      <path d="M270 322 L478 270 L712 332 L650 500 L366 488 Z" fill="none" stroke="#{accent}" stroke-width="8" opacity="0.18"/>
+      <path d="M478 270 L366 488 M712 332 L366 488" stroke="#{accent}" stroke-width="5" opacity="0.14"/>
+      """
+
+    node_markup =
+      Enum.map_join(lines, "\n", fn {line, index} ->
+        {x, y} = Enum.at(nodes, index)
+        escaped = slide_label(line, 18)
+
+        """
+        <g filter="url(#softShadow)">
+          <circle cx="#{x}" cy="#{y}" r="64" fill="#ffffff" opacity="0.90"/>
+          <circle cx="#{x}" cy="#{y - 24}" r="12" fill="#{accent}"/>
+          <text x="#{x - 46}" y="#{y + 14}" class="small">#{escaped}</text>
+        </g>
+        """
+      end)
+
+    connectors <> node_markup
+  end
+
+  defp slide_label(text, limit \\ 38) do
+    text
+    |> String.graphemes()
+    |> Enum.take(limit)
+    |> Enum.join()
+    |> then(fn label ->
+      if String.length(text) > limit, do: label <> "...", else: label
+    end)
+    |> svg_escape()
+  end
+
+  defp svg_escape(text) do
+    text
+    |> Phoenix.HTML.html_escape()
+    |> Phoenix.HTML.safe_to_string()
+  end
+
+  defp slide_lines(slide) do
+    slide
+    |> String.split("\n")
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == "" or &1 == "---" or &1 == "Notes:"))
+    |> Enum.map(&String.replace(&1, ~r/\s*\[[^\]]+\]/, ""))
+  end
+
+  defp slide_title([], index), do: "Slide #{index}"
+
+  defp slide_title([line | _lines], _index) do
+    line
+    |> String.trim_leading("#")
+    |> String.replace(~r/^\s*[-*]\s+/, "")
+    |> String.trim()
+  end
+
+  defp slide_body([_title | lines]) do
+    lines
+    |> Enum.map(&String.replace(&1, ~r/^\s*[-*]\s+/, ""))
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+  end
+
+  defp slide_body([]), do: []
+
+  defp cards_from_markdown(markdown) when is_binary(markdown) do
+    markdown
+    |> String.trim()
+    |> String.split(~r/(?=^\s*(?:[-*]\s*)?(?:\*\*)?Front\s*:)/im, trim: true)
+    |> Enum.map(&format_card_slide/1)
+    |> Enum.reject(&(&1 == ""))
+    |> case do
+      [] -> slides_from_markdown(markdown)
+      cards -> cards
+    end
+  end
+
+  defp cards_from_markdown(_markdown), do: []
+
+  defp studio_flashcards(%{type: "cards", content: content}) when is_binary(content) do
+    content
+    |> String.trim()
+    |> String.split(~r/(?=^\s*(?:[-*]\s*)?(?:\*\*)?Front\s*:)/im, trim: true)
+    |> Enum.map(&flashcard_from_markdown/1)
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp studio_flashcards(_output), do: []
+
+  defp flashcard_count(output), do: length(studio_flashcards(output))
+
+  defp active_flashcard(output, index) do
+    output
+    |> studio_flashcards()
+    |> Enum.at(index)
+  end
+
+  defp flashcard_from_markdown(card) do
+    normalized =
+      card
+      |> String.trim()
+      |> String.replace(~r/^\s*[-*]\s*/, "")
+
+    with [front, back] <-
+           Regex.split(~r/(?:\*\*)?Back(?:\*\*)?\s*:/i, normalized, parts: 2),
+         front <- String.replace(front, ~r/(?:\*\*)?Front(?:\*\*)?\s*:/i, ""),
+         front <- clean_flashcard_text(front),
+         back <- clean_flashcard_text(back),
+         false <- front == "",
+         false <- back == "" do
+      %{front: front, back: back}
+    else
+      _ -> nil
+    end
+  end
+
+  defp clean_flashcard_text(text) do
+    text
+    |> String.replace(~r/^\s*#+\s*/m, "")
+    |> String.replace(~r/\s*\[[^\]]+\]/, "")
+    |> String.split("\n")
+    |> Enum.map(&String.trim/1)
+    |> Enum.join("\n")
+    |> String.trim()
+  end
+
+  defp flashcard_text_html(text) do
+    {:safe, ["<div class=\"flashcard-text\">", Phoenix.HTML.Engine.html_escape(text), "</div>"]}
+  end
+
+  defp format_card_slide(card) do
+    card
+    |> String.trim()
+    |> String.replace(~r/^\s*[-*]\s*/, "")
+    |> String.replace(~r/(?:\*\*)?Front(?:\*\*)?\s*:/i, "## ")
+    |> String.replace(~r/(?:\*\*)?Back(?:\*\*)?\s*:/i, "\n\n")
+    |> String.trim()
+  end
 
   defp chat_question_context(_notebook, question, "web", _selected_source_ids, web_results) do
     Notebooks.web_question_context(question, web_results: web_results)
@@ -775,6 +1374,73 @@ defmodule NotexWeb.NotebookLive do
     MapSet.member?(generating_artifacts, artifact)
   end
 
+  defp active_studio_settings(nil), do: nil
+
+  defp active_studio_settings(artifact) do
+    Enum.find(studio_actions(), &(&1.artifact == artifact))
+  end
+
+  defp studio_actions do
+    [
+      studio_action("infographic", "studio-action-infographic", "Infographic", "hero-photo",
+        bg: "bg-emerald-50",
+        hover: "hover:bg-emerald-100",
+        text: "text-emerald-950",
+        ring: "phx-click-loading:ring-emerald-300"
+      ),
+      studio_action("data_table", "studio-action-data-table", "DataTable", "hero-table-cells",
+        bg: "bg-[#f7f0ff]",
+        hover: "hover:bg-violet-100",
+        text: "text-violet-950",
+        ring: "phx-click-loading:ring-violet-300"
+      ),
+      studio_action("slides", "studio-action-slides", "Slides", "hero-presentation-chart-bar",
+        bg: "bg-sky-100",
+        hover: "hover:bg-sky-200",
+        text: "text-sky-950",
+        ring: "phx-click-loading:ring-sky-300"
+      ),
+      studio_action("audio_overview", "studio-action-audio-overview", "Audio", "hero-sparkles",
+        bg: "bg-indigo-50",
+        hover: "hover:bg-indigo-100",
+        text: "text-indigo-950",
+        ring: "phx-click-loading:ring-indigo-300"
+      ),
+      studio_action("mind_map", "studio-action-mind-map", "MindMap", "hero-share",
+        bg: "bg-[#fdf0fd]",
+        hover: "hover:bg-fuchsia-100",
+        text: "text-fuchsia-950",
+        ring: "phx-click-loading:ring-fuchsia-300"
+      ),
+      studio_action("flashcards", "studio-action-flashcards", "Cards", "hero-rectangle-stack",
+        bg: "bg-[#dcf8fb]",
+        hover: "hover:bg-cyan-100",
+        text: "text-cyan-950",
+        ring: "phx-click-loading:ring-cyan-300"
+      ),
+      studio_action("report", "studio-action-report", "Report", "hero-document-text",
+        bg: "bg-[#fffaf0]",
+        hover: "hover:bg-amber-100",
+        text: "text-amber-950",
+        ring: "phx-click-loading:ring-amber-300"
+      )
+    ]
+  end
+
+  defp studio_action(artifact, id, label, icon, opts) do
+    %{
+      artifact: artifact,
+      id: id,
+      settings_id: "#{id}-settings",
+      label: label,
+      icon: icon,
+      bg: opts[:bg],
+      hover: opts[:hover],
+      text: opts[:text],
+      ring: opts[:ring]
+    }
+  end
+
   defp transient_message(id, notebook_id, role, content, citations, inserted_at) do
     %Message{
       id: id,
@@ -790,8 +1456,73 @@ defmodule NotexWeb.NotebookLive do
   defp studio_outputs(messages) do
     messages
     |> studio_entries()
+    |> Enum.reject(&(&1.label == "Quiz"))
     |> Enum.reverse()
   end
+
+  defp refresh_studio_outputs(notebook, result, artifact, generated_notebook) do
+    notebook
+    |> Notebooks.list_messages()
+    |> studio_outputs()
+    |> maybe_prepend_generated_studio_output(notebook, generated_notebook, artifact, result)
+    |> Enum.uniq_by(& &1.id)
+  end
+
+  defp maybe_prepend_generated_studio_output(
+         studio_outputs,
+         _current_notebook,
+         _generated_notebook,
+         "quiz",
+         _result
+       ),
+       do: studio_outputs
+
+  defp maybe_prepend_generated_studio_output(
+         studio_outputs,
+         current_notebook,
+         generated_notebook,
+         artifact,
+         result
+       ) do
+    if same_notebook?(current_notebook, generated_notebook) do
+      [studio_output_from_result(artifact, result) | studio_outputs]
+    else
+      studio_outputs
+    end
+  end
+
+  defp ensure_generated_studio_output(
+         studio_outputs,
+         current_notebook,
+         generated_notebook,
+         artifact,
+         result
+       ) do
+    cond do
+      not same_notebook?(current_notebook, generated_notebook) ->
+        studio_outputs
+
+      Enum.any?(studio_outputs, &(&1.id == result.message.id)) ->
+        studio_outputs
+
+      true ->
+        [studio_output_from_result(artifact, result) | studio_outputs]
+    end
+  end
+
+  defp studio_output_from_result(artifact, result) do
+    artifact
+    |> studio_artifact_meta()
+    |> Map.merge(%{
+      id: result.message.id,
+      content: result.answer,
+      inserted_at: result.message.inserted_at,
+      title: studio_output_title(result.answer, studio_label(artifact))
+    })
+  end
+
+  defp same_notebook?(%{id: current_id}, %{id: generated_id}), do: current_id == generated_id
+  defp same_notebook?(_current_notebook, _generated_notebook), do: false
 
   defp studio_entries(messages) do
     messages
@@ -823,6 +1554,35 @@ defmodule NotexWeb.NotebookLive do
   end
 
   defp studio_request_meta("Create an audio overview" <> _rest),
+    do: studio_artifact_meta("audio_overview")
+
+  defp studio_request_meta("Create a report" <> _rest),
+    do: studio_artifact_meta("report")
+
+  defp studio_request_meta("Create a quiz" <> _rest),
+    do: studio_artifact_meta("quiz")
+
+  defp studio_request_meta("Create flashcards" <> _rest),
+    do: studio_artifact_meta("flashcards")
+
+  defp studio_request_meta("Create a data table" <> _rest),
+    do: studio_artifact_meta("data_table")
+
+  defp studio_request_meta("Create a mind map" <> _rest),
+    do: studio_artifact_meta("mind_map")
+
+  defp studio_request_meta("Create an infographic" <> _rest),
+    do: studio_artifact_meta("infographic")
+
+  defp studio_request_meta("Create slide materials" <> _rest),
+    do: studio_artifact_meta("slides")
+
+  defp studio_request_meta("Create a video explainer" <> _rest),
+    do: studio_artifact_meta("video_explainer")
+
+  defp studio_request_meta(_request), do: nil
+
+  defp studio_artifact_meta("audio_overview"),
     do: %{
       type: "audio",
       label: "Audio",
@@ -830,57 +1590,80 @@ defmodule NotexWeb.NotebookLive do
       tone: "bg-indigo-50 text-indigo-950"
     }
 
-  defp studio_request_meta("Create a report" <> _rest),
+  defp studio_artifact_meta("report"),
     do: %{
       type: "document",
       label: "Report",
       icon: "hero-document-text",
-      tone: "bg-amber-50 text-amber-950"
+      tone: "bg-[#fffaf0] text-amber-950"
     }
 
-  defp studio_request_meta("Create a quiz" <> _rest),
+  defp studio_artifact_meta("quiz"),
     do: %{
       type: "document",
       label: "Quiz",
       icon: "hero-question-mark-circle",
-      tone: "bg-cyan-50 text-cyan-950"
+      tone: "bg-rose-50 text-rose-950"
     }
 
-  defp studio_request_meta("Create flashcards" <> _rest),
+  defp studio_artifact_meta("flashcards"),
     do: %{
       type: "cards",
       label: "Cards",
       icon: "hero-rectangle-stack",
-      tone: "bg-rose-50 text-rose-950"
+      tone: "bg-[#dcf8fb] text-cyan-950"
     }
 
-  defp studio_request_meta("Create a data table" <> _rest),
+  defp studio_artifact_meta("data_table"),
     do: %{
       type: "table",
-      label: "Data Table",
+      label: "DataTable",
       icon: "hero-table-cells",
-      tone: "bg-violet-50 text-violet-950"
+      tone: "bg-[#f7f0ff] text-violet-950"
     }
 
-  defp studio_request_meta("Create a mind map" <> _rest),
+  defp studio_artifact_meta("mind_map"),
     do: %{
       type: "map",
-      label: "Mind Map",
+      label: "MindMap",
       icon: "hero-share",
-      tone: "bg-fuchsia-50 text-fuchsia-950"
+      tone: "bg-[#fdf0fd] text-fuchsia-950"
     }
 
-  defp studio_request_meta("Create an infographic" <> _rest),
+  defp studio_artifact_meta("infographic"),
     do: %{
       type: "image",
-      label: "InfoGraphic",
+      label: "Infographic",
       icon: "hero-photo",
       tone: "bg-emerald-50 text-emerald-950"
     }
 
-  defp studio_request_meta(_request), do: nil
+  defp studio_artifact_meta("slides"),
+    do: %{
+      type: "slides",
+      label: "Slides",
+      icon: "hero-presentation-chart-bar",
+      tone: "bg-sky-100 text-sky-950"
+    }
+
+  defp studio_artifact_meta("video_explainer"),
+    do: %{
+      type: "video",
+      label: "Video",
+      icon: "hero-video-camera",
+      tone: "bg-[#f4fbdc] text-lime-950"
+    }
+
+  defp studio_artifact_meta(_artifact),
+    do: %{
+      type: "document",
+      label: "Studio",
+      icon: "hero-document-text",
+      tone: "bg-zinc-50 text-zinc-950"
+    }
 
   defp studio_output_title("data:image/" <> _rest, fallback), do: fallback
+  defp studio_output_title("data:video/" <> _rest, fallback), do: fallback
   defp studio_output_title("```mermaid" <> _rest, fallback), do: fallback
 
   defp studio_output_title(content, fallback) when is_binary(content) do
@@ -897,12 +1680,12 @@ defmodule NotexWeb.NotebookLive do
 
   defp studio_output_title(_content, fallback), do: fallback
 
-  defp fallback_studio_title(lines, "Data Table") do
+  defp fallback_studio_title(lines, fallback) when fallback in ["Data Table", "DataTable"] do
     lines
     |> markdown_table_rows()
     |> table_summary_title()
     |> case do
-      nil -> "Data Table"
+      nil -> fallback
       title -> String.slice(title, 0, 80)
     end
   end
@@ -1288,13 +2071,15 @@ defmodule NotexWeb.NotebookLive do
   defp studio_label("audio_overview"), do: "Audio"
   defp studio_label("report"), do: "Report"
   defp studio_label("quiz"), do: "Quiz"
-  defp studio_label("flashcards"), do: "Flashcards"
-  defp studio_label("data_table"), do: "Data Table"
-  defp studio_label("mind_map"), do: "Mind Map"
-  defp studio_label("infographic"), do: "InfoGraphic"
+  defp studio_label("flashcards"), do: "Cards"
+  defp studio_label("data_table"), do: "DataTable"
+  defp studio_label("mind_map"), do: "MindMap"
+  defp studio_label("infographic"), do: "Infographic"
+  defp studio_label("slides"), do: "Slides"
+  defp studio_label("video_explainer"), do: "Video"
   defp studio_label(_artifact), do: "artifact"
 
-  defp message_tone("user"), do: "border-zinc-200 bg-zinc-100 text-zinc-950"
+  defp message_tone("user"), do: "chat-user-message border-zinc-200 text-zinc-950"
   defp message_tone("assistant"), do: "border-zinc-200 bg-white text-zinc-950"
   defp message_tone(_role), do: "border-zinc-200 bg-zinc-50 text-zinc-950"
 
@@ -1318,4 +2103,14 @@ defmodule NotexWeb.NotebookLive do
 
   defp format_image_reason(:timeout), do: "Codex app-server timed out."
   defp format_image_reason(reason), do: inspect(reason)
+
+  defp format_video_reason({:missing_executable, command}) do
+    "ffmpeg command #{inspect(command)} was not found."
+  end
+
+  defp format_video_reason({:ffmpeg_failed, status, output}) do
+    "ffmpeg exited with status #{status}: #{output}"
+  end
+
+  defp format_video_reason(reason), do: inspect(reason)
 end

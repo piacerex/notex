@@ -7,6 +7,7 @@ defmodule NotexWeb.NotebookLiveTest do
     old_config = Application.get_env(:notex, Notex.LLM)
     old_web_search_config = Application.get_env(:notex, Notex.WebSearch)
     old_image_config = Application.get_env(:notex, Notex.ImageGeneration)
+    old_video_config = Application.get_env(:notex, Notex.VideoGeneration)
 
     Application.put_env(
       :notex,
@@ -29,6 +30,12 @@ defmodule NotexWeb.NotebookLiveTest do
         Application.put_env(:notex, Notex.ImageGeneration, old_image_config)
       else
         Application.delete_env(:notex, Notex.ImageGeneration)
+      end
+
+      if old_video_config do
+        Application.put_env(:notex, Notex.VideoGeneration, old_video_config)
+      else
+        Application.delete_env(:notex, Notex.VideoGeneration)
       end
     end)
   end
@@ -379,7 +386,7 @@ defmodule NotexWeb.NotebookLiveTest do
 
     view
     |> element("#project-select-form")
-    |> render_change(%{project: %{slug: "newpj"}})
+    |> render_change(%{project: %{slug: "NewPJ"}})
 
     assert has_element?(view, "#project-name-form input[value='NewPJ']")
   end
@@ -478,7 +485,7 @@ defmodule NotexWeb.NotebookLiveTest do
     assert has_element?(view, "#web-result-checkbox-#{result_id}[checked]")
   end
 
-  test "shows up to twenty web results in a scrollable list", %{conn: conn} do
+  test "shows web results in an eight-row scrollable list", %{conn: conn} do
     {:ok, view, _html} = live(conn, ~p"/")
 
     view
@@ -492,12 +499,12 @@ defmodule NotexWeb.NotebookLiveTest do
       assert has_element?(view, "#web-result-#{result_id}")
     end
 
-    result_21_id = Notex.WebSearch.result_id("https://example.com/many/21")
-    refute has_element?(view, "#web-result-#{result_21_id}")
-
     html = render(view)
-    assert html =~ ~s(id="web-results")
-    assert html =~ "max-h-[28rem]"
+
+    assert html =~
+             ~s(id="web-results" class="max-h-[29.75rem] min-h-0 flex-none space-y-1 overflow-y-auto pr-1")
+
+    assert html =~ ~s(id="sources-list" class="min-h-0 flex-1 space-y-1 overflow-y-auto pr-1")
     assert html =~ "overflow-y-auto"
   end
 
@@ -790,17 +797,26 @@ defmodule NotexWeb.NotebookLiveTest do
 
     {:ok, view, _html} = live(conn, ~p"/")
 
-    for artifact <- ~w(audio_overview report quiz flashcards data_table mind_map infographic) do
-      assert has_element?(view, "[phx-value-artifact='#{artifact}']")
-    end
-
     assert render(view) =~ "sm:grid-cols-3"
     assert has_element?(view, "#studio-action-data-table", "DataTable")
     assert has_element?(view, "#studio-action-mind-map", "MindMap")
-    assert has_element?(view, "#studio-action-infographic", "InfoGraphic")
+    assert has_element?(view, "#studio-action-infographic", "Infographic")
+    assert has_element?(view, "#studio-action-slides", "Slides")
+    refute has_element?(view, "#studio-action-video-explainer", "Video")
+    assert has_element?(view, "#studio-action-slides-settings")
 
     view
-    |> element("[phx-value-artifact='flashcards']")
+    |> element("#studio-action-slides-settings")
+    |> render_click()
+
+    assert has_element?(view, "#studio-settings-modal", "Slides")
+
+    view
+    |> element("#close-studio-settings-button")
+    |> render_click()
+
+    view
+    |> element("#studio-action-flashcards")
     |> render_click()
 
     assert render_until(view, "Stubbed LLM answer")
@@ -815,7 +831,7 @@ defmodule NotexWeb.NotebookLiveTest do
 
     for index <- 1..6 do
       view
-      |> element("[phx-value-artifact='flashcards']")
+      |> element("#studio-action-flashcards")
       |> render_click()
 
       wait_for_message_count(notebook, 2 + index * 2)
@@ -898,7 +914,7 @@ defmodule NotexWeb.NotebookLiveTest do
     |> render_click()
 
     wait_for_message_count(notebook, 2)
-    assert render(view) =~ "InfoGraphic"
+    assert render(view) =~ "Infographic"
 
     view
     |> element("#studio-output-list [phx-click='open_studio_output']")
@@ -912,6 +928,36 @@ defmodule NotexWeb.NotebookLiveTest do
            )
 
     refute has_element?(view, "#studio-player .studio-markdown")
+  end
+
+  test "slides outputs open as slide media", %{conn: conn} do
+    notebook = Notex.Notebooks.get_default_notebook()
+
+    {:ok, _source} =
+      Notex.Notebooks.add_source(notebook, %{
+        title: "Presentation source",
+        body: "Presentation source content can become slides and a video explainer."
+      })
+
+    {:ok, view, _html} = live(conn, ~p"/")
+
+    view
+    |> element("#studio-action-slides")
+    |> render_click()
+
+    assert render_until(view, "Stubbed LLM answer")
+    assert has_element?(view, "#studio-output-list [id^='studio-output-']", "Slides")
+
+    view
+    |> element("#studio-output-list [phx-click='open_studio_output'][phx-value-id='2']")
+    |> render_click()
+
+    assert has_element?(view, "#studio-output-modal")
+    assert has_element?(view, "[id^='studio-slides-']")
+    assert has_element?(view, ".studio-slide")
+    assert has_element?(view, "img.studio-slide-image[src^='data:image/svg+xml;base64,']")
+    refute has_element?(view, "#studio-player .studio-markdown > h1")
+    refute has_element?(view, "#studio-action-video-explainer")
   end
 
   test "studio output list omits time and can delete media", %{conn: conn} do
@@ -993,6 +1039,41 @@ defmodule NotexWeb.NotebookLiveTest do
            )
 
     refute has_element?(view, "#studio-output-list [id^='studio-output-']", "Front:")
+
+    view
+    |> element(
+      "#studio-output-list [phx-click='open_studio_output']",
+      "What should become the card title?"
+    )
+    |> render_click()
+
+    assert has_element?(view, "#studio-output-modal")
+    assert has_element?(view, ".flashcard-face", "What should become the card title?")
+    assert has_element?(view, ".flashcard-count", "1/2")
+
+    assert render(view) =~
+             ~s(<div class="flashcard-text">What should become the card title?</div>)
+
+    refute render(view) =~ "Slide 1"
+
+    view
+    |> element(".flashcard-face")
+    |> render_click()
+
+    assert has_element?(view, ".flashcard-face", "The answer.")
+
+    view
+    |> element(".flashcard-nav.is-next")
+    |> render_click()
+
+    assert has_element?(view, ".flashcard-face", "What is the second card?")
+    assert has_element?(view, ".flashcard-count", "2/2")
+    refute has_element?(view, ".studio-slide-image")
+    refute has_element?(view, "[id^='studio-markdown-']")
+
+    view
+    |> element("#close-studio-output-button")
+    |> render_click()
 
     view
     |> element("#studio-action-data-table")
@@ -1125,10 +1206,16 @@ defmodule NotexWeb.NotebookLiveTest do
           "**Summary**\n\nReport body title from the first real paragraph [1]"
 
         question =~ "flashcards" ->
-          "Front: What should become the card title? [1]\nBack: The answer."
+          "Front: What should become the card title? [1]\nBack: The answer.\n\nFront: What is the second card? [1]\nBack: Another answer."
 
         question =~ "markdown data table" ->
           "| Column | Detail |\n|---|---|\n| Alpha | Useful value [1] |\n| Beta | Other useful value [1] |"
+
+        question =~ "slide deck" ->
+          "# Slides title\n\n---\n\n## Slide one\n- Useful point [1]"
+
+        question =~ "narrated video package" ->
+          "# Video title\n\n## Useful scene\n- Useful scene [1]\n\nNarration:\nNarration text."
 
         true ->
           "Stubbed LLM answer from the provided evidence [1]"

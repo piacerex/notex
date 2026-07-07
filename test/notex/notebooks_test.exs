@@ -7,6 +7,7 @@ defmodule Notex.NotebooksTest do
     old_config = Application.get_env(:notex, Notex.LLM)
     old_web_search_config = Application.get_env(:notex, Notex.WebSearch)
     old_image_config = Application.get_env(:notex, Notex.ImageGeneration)
+    old_video_config = Application.get_env(:notex, Notex.VideoGeneration)
 
     Application.put_env(
       :notex,
@@ -29,6 +30,12 @@ defmodule Notex.NotebooksTest do
         Application.put_env(:notex, Notex.ImageGeneration, old_image_config)
       else
         Application.delete_env(:notex, Notex.ImageGeneration)
+      end
+
+      if old_video_config do
+        Application.put_env(:notex, Notex.VideoGeneration, old_video_config)
+      else
+        Application.delete_env(:notex, Notex.VideoGeneration)
       end
     end)
   end
@@ -208,7 +215,7 @@ defmodule Notex.NotebooksTest do
     assert length(Notebooks.list_messages(notebook)) == 2
 
     assert [_output_path] =
-             Path.wildcard(Path.join(storage_root(), "projects/*/outputs/report/*-report.json"))
+             Path.wildcard(Path.join(storage_root(), "projects/*/outputs/Report/*-report.json"))
   end
 
   test "renames project folder and keeps file-backed content under the project" do
@@ -221,16 +228,16 @@ defmodule Notex.NotebooksTest do
              })
 
     assert [_source_path] =
-             Path.wildcard(Path.join(storage_root(), "projects/newpj/inputs/*.json"))
+             Path.wildcard(Path.join(storage_root(), "projects/NewPJ/inputs/*.json"))
 
     assert {:ok, renamed} = Notebooks.update_project_name("Alpha Project")
     assert renamed.title == "Alpha Project"
 
     assert [_source_path] =
-             Path.wildcard(Path.join(storage_root(), "projects/alpha-project/inputs/*.json"))
+             Path.wildcard(Path.join(storage_root(), "projects/Alpha Project/inputs/*.json"))
 
     assert [] ==
-             Path.wildcard(Path.join(storage_root(), "projects/newpj/inputs/*.json"))
+             Path.wildcard(Path.join(storage_root(), "projects/NewPJ/inputs/*.json"))
   end
 
   test "creates and selects projects with collision-safe names" do
@@ -245,7 +252,7 @@ defmodule Notex.NotebooksTest do
 
     assert Enum.map(Notebooks.list_projects(), & &1.name) == ["NewPJ", "NewPJ 2", "NewPJ 3"]
 
-    assert {:ok, selected} = Notebooks.select_project("newpj")
+    assert {:ok, selected} = Notebooks.select_project("NewPJ")
     assert selected.title == "NewPJ"
 
     assert {:ok, renamed} = Notebooks.update_project_name("NewPJ 2")
@@ -286,9 +293,9 @@ defmodule Notex.NotebooksTest do
     assert Enum.map(Notebooks.list_projects(), & &1.name) == ["NewPJ"]
 
     assert [_source_path] =
-             Path.wildcard(Path.join(storage_root(), "projects/newpj/inputs/*.json"))
+             Path.wildcard(Path.join(storage_root(), "projects/NewPJ/inputs/*.json"))
 
-    assert [] == Path.wildcard(Path.join(storage_root(), "projects/newpj-2"))
+    assert [] == Path.wildcard(Path.join(storage_root(), "projects/NewPJ 2"))
   end
 
   test "data table studio artifacts normalize json answers to markdown" do
@@ -311,9 +318,9 @@ defmodule Notex.NotebooksTest do
     refute result.answer =~ ~s("item")
 
     assert [_path] =
-             Path.wildcard(Path.join(storage_root(), "projects/*/outputs/data-table/*.md"))
+             Path.wildcard(Path.join(storage_root(), "projects/*/outputs/DataTable/*.md"))
 
-    assert [] == Path.wildcard(Path.join(storage_root(), "projects/*/outputs/data-table/*.json"))
+    assert [] == Path.wildcard(Path.join(storage_root(), "projects/*/outputs/DataTable/*.json"))
     assert Enum.any?(Notebooks.list_messages(notebook), &(&1.content == result.answer))
   end
 
@@ -340,10 +347,59 @@ defmodule Notex.NotebooksTest do
     refute result.answer =~ "[1]"
 
     assert [_path] =
-             Path.wildcard(Path.join(storage_root(), "projects/*/outputs/mind-map/*.md"))
+             Path.wildcard(Path.join(storage_root(), "projects/*/outputs/MindMap/*.md"))
 
-    assert [] == Path.wildcard(Path.join(storage_root(), "projects/*/outputs/mind-map/*.json"))
+    assert [] == Path.wildcard(Path.join(storage_root(), "projects/*/outputs/MindMap/*.json"))
     assert Enum.any?(Notebooks.list_messages(notebook), &(&1.content == result.answer))
+  end
+
+  test "slides save markdown and video explainer saves an mp4 data url" do
+    old_config = Application.get_env(:notex, Notex.LLM)
+    Application.put_env(:notex, Notex.LLM, Keyword.put(old_config, :provider, __MODULE__))
+
+    Application.put_env(:notex, Notex.VideoGeneration,
+      runner: fn _executable, markdown, _config ->
+        assert markdown =~ "# Launch Explainer"
+        path = Path.join(System.tmp_dir!(), "notex-test-video.mp4")
+        File.write!(path, "fake mp4")
+        {:ok, path}
+      end,
+      ffmpeg_command: System.find_executable("sh") || "sh"
+    )
+
+    notebook = Notebooks.get_default_notebook()
+
+    assert {:ok, source} =
+             Notebooks.add_source(notebook, %{
+               title: "Media source",
+               body: "Launch planning needs slides and a short video explainer."
+             })
+
+    assert {:ok, slides} =
+             Notebooks.generate_studio_artifact(notebook, "slides", source_ids: [source.id])
+
+    assert slides.artifact == "Slides"
+    assert slides.answer =~ "# Launch Brief"
+    assert slides.answer =~ "---"
+
+    assert {:ok, video} =
+             Notebooks.generate_studio_artifact(notebook, "video_explainer",
+               source_ids: [source.id]
+             )
+
+    assert video.artifact == "Video explainer"
+    assert video.answer == "data:video/mp4;base64,#{Base.encode64("fake mp4")}"
+
+    assert [_path] =
+             Path.wildcard(Path.join(storage_root(), "projects/*/outputs/Slides/*.md"))
+
+    assert [_path] =
+             Path.wildcard(Path.join(storage_root(), "projects/*/outputs/Video/*.json"))
+
+    assert [] == Path.wildcard(Path.join(storage_root(), "projects/*/outputs/Slides/*.json"))
+
+    assert [] ==
+             Path.wildcard(Path.join(storage_root(), "projects/*/outputs/Video/*.md"))
   end
 
   test "infographic studio artifacts use Codex app-server image generation" do
@@ -448,6 +504,28 @@ defmodule Notex.NotebooksTest do
             - Risks [1]
             - Owners [1]
             - Decisions [1]
+          """
+
+        question =~ "slide deck" ->
+          """
+          # Launch Brief
+
+          ---
+
+          ## Main idea
+          - Slides summarize the evidence [1]
+          """
+
+        question =~ "narrated video package" ->
+          """
+          # Launch Explainer
+
+          ## Launch context
+          - Open on the launch context [1]
+          - Show the first key evidence [1]
+
+          Narration:
+          This short explainer introduces the launch.
           """
 
         true ->

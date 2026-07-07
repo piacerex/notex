@@ -3,13 +3,12 @@ defmodule Notex.Notebooks do
   File-backed notebook storage, source ingestion, retrieval, and cited draft answers.
   """
 
-  alias Notex.{ImageGeneration, LLM, WebSearch}
+  alias Notex.{ImageGeneration, LLM, VideoGeneration, WebSearch}
   alias Notex.Notebooks.{Message, Notebook, Source, SourceChunk, Text}
 
   @default_title "NewPJ"
   @default_description "Local source-grounded notes"
   @chat_messages_file "chat-messages.jsonl"
-  @project_metadata_file "project.json"
   @active_project_key :active_project
 
   def project_name do
@@ -51,7 +50,6 @@ defmodule Notex.Notebooks do
 
     ensure_project_dir_moved(old.slug, new.slug)
     set_active_project_metadata(new)
-    write_project_metadata(new)
     {:ok, get_default_notebook()}
   end
 
@@ -62,7 +60,6 @@ defmodule Notex.Notebooks do
     File.mkdir_p!(project_dir(metadata.slug))
     File.mkdir_p!(inputs_dir(metadata.slug))
     File.mkdir_p!(outputs_dir(metadata.slug))
-    write_project_metadata(metadata)
     {:ok, get_default_notebook()}
   end
 
@@ -457,6 +454,15 @@ defmodule Notex.Notebooks do
     |> case do
       {:ok, %{content: content, meta: meta}} -> {:ok, content, meta}
       {:error, reason} -> {:error, {:image_unavailable, reason}}
+    end
+  end
+
+  defp generate_studio_content(%{generator: :video} = spec, matches) do
+    with {:ok, markdown, meta} <- synthesize_answer(spec.prompt, matches),
+         {:ok, %{content: content, meta: video_meta}} <- VideoGeneration.generate(markdown) do
+      {:ok, content, Map.merge(meta, video_meta)}
+    else
+      {:error, reason} -> {:error, {:video_unavailable, reason}}
     end
   end
 
@@ -929,8 +935,11 @@ defmodule Notex.Notebooks do
        Create flashcards from the evidence.
        Requirements:
        - Format the output as Markdown.
-       - Write 8 compact Q/A cards.
-       - Format each card as Front and Back.
+       - Write 8 compact Q/A cards only; do not add a title card, summary card, or introductory first card.
+       - Format each card exactly as:
+         Front: one question
+         Back: one answer
+       - Separate cards with a blank line.
        - Focus on facts, definitions, risks, and relationships.
        - Cite the back of each card.
        - Use only the evidence.
@@ -981,19 +990,65 @@ defmodule Notex.Notebooks do
     {:ok,
      %{
        type: "infographic",
-       title: "InfoGraphic",
+       title: "Infographic",
        request: "Create an infographic from the checked sources.",
        generator: :image,
        prompt: """
        Create a polished editorial infographic from the evidence.
        Requirements:
        - Use a horizontal landscape canvas, preferably 16:9 or similarly wide.
-       - Arrange content left-to-right or in a wide dashboard layout; do not make a vertical poster.
+       - Keep the composition spacious and horizontally balanced; do not squeeze content into narrow vertical columns.
+       - Use 2-3 wide horizontal bands or large landscape cards instead of 4+ thin side-by-side panels.
+       - Preserve natural proportions for icons, portraits, charts, logos, and diagrams; nothing should look horizontally compressed.
+       - Arrange content in a wide dashboard layout; do not make a vertical poster.
        - Use a clean information-design layout, not a decorative poster.
        - Include one clear title, 3-5 concise visual sections, and source-grounded labels.
        - Prioritize legible typography, simple charts, callouts, and visual hierarchy.
        - Do not invent facts beyond the evidence.
        - Avoid tiny dense text; keep wording short and readable.
+       """
+     }}
+  end
+
+  defp studio_spec("slides") do
+    {:ok,
+     %{
+       type: "slides",
+       title: "Slides",
+       request: "Create slide materials from the checked sources.",
+       prompt: """
+       Create a concise slide deck from the evidence.
+       Requirements:
+       - Format the output as Markdown.
+       - Start with one title slide heading.
+       - Separate slides with horizontal rules using ---.
+       - Write 6-8 slides.
+       - Each slide must have a clear heading and 2-4 short bullets.
+       - Include speaker notes under a "Notes:" label when useful.
+       - Cite factual claims with bracket citations.
+       - Use only the evidence.
+       """
+     }}
+  end
+
+  defp studio_spec("video_explainer") do
+    {:ok,
+     %{
+       type: "video-explainer",
+       title: "Video explainer",
+       request: "Create a video explainer from the checked sources.",
+       generator: :video,
+       prompt: """
+       Create a short narrated video package from the evidence by adapting the infographic content into multiple slide-like parts.
+       Requirements:
+       - Format the output as Markdown.
+       - Start with one concise video title as an H1.
+       - Split the same kind of content used for an infographic into 4-6 parts.
+       - Each part must be a slide section with an H2 heading, 2-4 short visual bullets, and a "Narration:" paragraph.
+       - Use the slides as infographic-style visual panels: concise labels, clear sequencing, and source-grounded facts.
+       - Keep narration natural, spoken, and ready to read aloud.
+       - Cite factual claims with bracket citations.
+       - Use only the evidence.
        """
      }}
   end
@@ -1152,7 +1207,7 @@ defmodule Notex.Notebooks do
 
   defp write_studio_output(data) do
     ensure_storage!()
-    type_dir = Path.join(outputs_dir(), data.type)
+    type_dir = Path.join(outputs_dir(), studio_output_dir_name(data.type))
     File.mkdir_p!(type_dir)
 
     path =
@@ -1189,10 +1244,22 @@ defmodule Notex.Notebooks do
     end
   end
 
-  defp studio_output_markdown?(type), do: type in ["data-table", "mind-map"]
+  defp studio_output_markdown?(type),
+    do: type in ["data-table", "mind-map", "slides"]
 
   defp studio_output_extension(type),
     do: if(studio_output_markdown?(type), do: "md", else: "json")
+
+  defp studio_output_dir_name("audio"), do: "Audio"
+  defp studio_output_dir_name("report"), do: "Report"
+  defp studio_output_dir_name("quiz"), do: "Quiz"
+  defp studio_output_dir_name("flashcards"), do: "cards"
+  defp studio_output_dir_name("data-table"), do: "DataTable"
+  defp studio_output_dir_name("mind-map"), do: "MindMap"
+  defp studio_output_dir_name("infographic"), do: "Infographic"
+  defp studio_output_dir_name("slides"), do: "Slides"
+  defp studio_output_dir_name("video-explainer"), do: "Video"
+  defp studio_output_dir_name(type), do: type
 
   defp studio_output_markdown(data) do
     metadata =
@@ -1347,10 +1414,15 @@ defmodule Notex.Notebooks do
 
   defp slug(text) do
     text
-    |> String.downcase()
-    |> String.replace(~r/[^[:alnum:]]+/u, "-")
-    |> String.trim("-")
+    |> normalize_project_name()
+    |> String.replace(~r/[\/\\:\*\?"<>\|\x00-\x1F]/u, "-")
+    |> String.trim()
+    |> String.trim(".")
     |> String.slice(0, 60)
+    |> case do
+      "" -> @default_title
+      value -> value
+    end
   end
 
   defp format_id(id) when is_integer(id),
@@ -1427,7 +1499,6 @@ defmodule Notex.Notebooks do
   end
 
   defp project_dir(slug), do: Path.join(projects_dir(), slug)
-  defp project_metadata_path(slug), do: Path.join(project_dir(slug), @project_metadata_file)
 
   defp project_metadata do
     case Application.get_env(:notex, @active_project_key) do
@@ -1475,40 +1546,19 @@ defmodule Notex.Notebooks do
       is_binary(preferred_name) and String.trim(preferred_name) != "" ->
         normalize_project_name(preferred_name)
 
-      is_binary(project_name_from_metadata(project_slug)) ->
-        project_name_from_metadata(project_slug)
-
       project_slug == "" ->
         @default_title
 
-      true ->
+      Regex.match?(~r/^newpj(?:[-\s]\d+)?$/i, project_slug) ->
         project_slug
         |> String.replace("-", " ")
-        |> String.split(" ", trim: true)
-        |> Enum.map_join(" ", fn
-          "newpj" -> "NewPJ"
-          word -> String.capitalize(word)
-        end)
+        |> String.replace(~r/^newpj/i, "NewPJ")
+        |> normalize_project_name()
+
+      true ->
+        project_slug
         |> normalize_project_name()
     end
-  end
-
-  defp project_name_from_metadata(project_slug) do
-    with {:ok, data} <- read_json_file(project_metadata_path(project_slug)),
-         name when is_binary(name) and name != "" <- Map.get(data, "name") do
-      normalize_project_name(name)
-    else
-      _error -> nil
-    end
-  end
-
-  defp write_project_metadata(%{name: name, slug: slug}) do
-    File.mkdir_p!(project_dir(slug))
-
-    File.write!(
-      project_metadata_path(slug),
-      Jason.encode!(%{"name" => normalize_project_name(name), "slug" => slug}, pretty: true)
-    )
   end
 
   defp unique_project_name(base_name, allowed_slug \\ nil) do

@@ -40,7 +40,7 @@ defmodule NotexWeb.Layouts do
 
   def app(assigns) do
     ~H"""
-    <header class="border-b border-indigo-100 bg-white px-4 sm:px-6 lg:px-8">
+    <header class="bg-white px-4 sm:px-6 lg:px-8">
       <nav class="flex min-h-12 w-full max-w-none items-center justify-between gap-4 py-1">
         <div class="flex min-w-0 flex-1 items-center gap-4">
           <a href="/" class="flex shrink-0 items-center gap-2">
@@ -105,7 +105,7 @@ defmodule NotexWeb.Layouts do
                 type="button"
                 phx-click="delete_project"
                 data-confirm="Delete this project?"
-                class="inline-flex h-8 w-8 items-center justify-center rounded-md border border-zinc-200 text-zinc-600 transition hover:border-rose-300 hover:bg-rose-50 hover:text-rose-700"
+                class="destructive-action inline-flex h-8 w-8 items-center justify-center rounded-md border border-zinc-200 text-zinc-600"
                 title="Delete project"
                 aria-label="Delete project"
               >
@@ -158,7 +158,7 @@ defmodule NotexWeb.Layouts do
       </nav>
     </header>
 
-    <main class="bg-indigo-50/60">
+    <main>
       {render_slot(@inner_block)}
     </main>
 

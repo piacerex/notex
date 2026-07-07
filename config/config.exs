@@ -19,6 +19,12 @@ config :notex, Notex.ImageGeneration,
   model: "gpt-5.5",
   reasoning_effort: "low"
 
+config :notex, Notex.VideoGeneration,
+  ffmpeg_command: "ffmpeg",
+  duration: 12,
+  size: "1280x720",
+  fontfile: System.get_env("NOTEX_VIDEO_FONTFILE")
+
 # Configure the endpoint
 config :notex, NotexWeb.Endpoint,
   url: [host: "localhost"],

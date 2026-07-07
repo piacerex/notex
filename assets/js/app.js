@@ -45,7 +45,23 @@ const loadMermaid = async () => {
   mermaidClient.initialize({
     startOnLoad: false,
     securityLevel: "strict",
-    theme: "default",
+    theme: "base",
+    themeVariables: {
+      primaryColor: "#fefaff",
+      primaryBorderColor: "#f3d9fa",
+      primaryTextColor: "#5a2864",
+      secondaryColor: "#fbfdff",
+      secondaryBorderColor: "#dcecfb",
+      secondaryTextColor: "#2d5274",
+      tertiaryColor: "#fbfefc",
+      tertiaryBorderColor: "#d9f2e2",
+      tertiaryTextColor: "#2d6440",
+      lineColor: "#e6dced",
+      mainBkg: "#fefaff",
+      secondBkg: "#fbfdff",
+      tertiaryBkg: "#fbfefc",
+      background: "#ffffff",
+    },
   })
 
   return mermaidClient
@@ -67,10 +83,15 @@ const sanitizeMermaidMindmap = source => {
 const Hooks = {
   ChatScroll: {
     mounted() {
+      this.messageCount = this.el.children.length
       this.scrollToBottom()
     },
     updated() {
-      this.scrollToBottom()
+      const messageCount = this.el.children.length
+      if (messageCount !== this.messageCount) {
+        this.messageCount = messageCount
+        this.scrollToBottom()
+      }
     },
     scrollToBottom() {
       requestAnimationFrame(() => {
