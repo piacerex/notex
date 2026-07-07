@@ -18,6 +18,7 @@ defmodule NotexWeb.Router do
     pipe_through :browser
 
     live "/", NotebookLive, :index
+    live "/projects/:project_id", NotebookLive, :index
   end
 
   scope "/", NotexWeb do

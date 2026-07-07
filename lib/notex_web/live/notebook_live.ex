@@ -16,6 +16,7 @@ defmodule NotexWeb.NotebookLive do
     socket =
       socket
       |> assign(:notebook, notebook)
+      |> assign(:project_url, project_path())
       |> assign(:projects, Notebooks.list_projects())
       |> assign(:project_name_form, to_form(%{"name" => notebook.title}, as: :project))
       |> assign(:sources, sources)
@@ -55,33 +56,68 @@ defmodule NotexWeb.NotebookLive do
   end
 
   @impl true
+  def handle_params(%{"project_id" => project_id}, _uri, socket) do
+    case Notebooks.select_project(project_id) do
+      {:ok, notebook} ->
+        {:noreply, load_project(socket, notebook)}
+
+      {:error, :not_found} ->
+        {:noreply, put_flash(socket, :error, "Project not found.")}
+    end
+  end
+
+  def handle_params(_params, _uri, socket), do: {:noreply, socket}
+
+  @impl true
   def handle_event("toggle_source_form", _params, socket) do
     {:noreply, update(socket, :show_source_form, &(!&1))}
   end
 
   def handle_event("save_project_name", %{"project" => %{"name" => name}}, socket) do
     {:ok, notebook} = Notebooks.update_project_name(name)
-    socket = socket |> load_project(notebook) |> put_flash(:info, "Project renamed.")
+
+    socket =
+      socket
+      |> load_project(notebook)
+      |> put_flash(:info, "Project renamed.")
+      |> push_project_patch()
 
     {:noreply, socket}
   end
 
   def handle_event("create_project", _params, socket) do
     {:ok, notebook} = Notebooks.create_project()
-    socket = socket |> load_project(notebook) |> put_flash(:info, "Project created.")
+
+    socket =
+      socket
+      |> load_project(notebook)
+      |> put_flash(:info, "Project created.")
+      |> push_project_patch()
+
     {:noreply, socket}
   end
 
   def handle_event("delete_project", _params, socket) do
     {:ok, notebook} = Notebooks.delete_project()
-    socket = socket |> load_project(notebook) |> put_flash(:info, "Project deleted.")
+
+    socket =
+      socket
+      |> load_project(notebook)
+      |> put_flash(:info, "Project deleted.")
+      |> push_project_patch()
+
     {:noreply, socket}
   end
 
   def handle_event("select_project", %{"project" => %{"slug" => slug}}, socket) do
     case Notebooks.select_project(slug) do
       {:ok, notebook} ->
-        socket = socket |> load_project(notebook) |> put_flash(:info, "Project selected.")
+        socket =
+          socket
+          |> load_project(notebook)
+          |> put_flash(:info, "Project selected.")
+          |> push_project_patch()
+
         {:noreply, socket}
 
       {:error, :not_found} ->
@@ -1406,6 +1442,16 @@ defmodule NotexWeb.NotebookLive do
         text: "text-indigo-950",
         ring: "phx-click-loading:ring-indigo-300"
       ),
+      studio_action(
+        "video_explainer",
+        "studio-action-video-explainer",
+        "Video",
+        "hero-video-camera",
+        bg: "bg-[#f4fbdc]",
+        hover: "hover:bg-lime-100",
+        text: "text-lime-950",
+        ring: "phx-click-loading:ring-lime-300"
+      ),
       studio_action("mind_map", "studio-action-mind-map", "MindMap", "hero-share",
         bg: "bg-[#fdf0fd]",
         hover: "hover:bg-fuchsia-100",
@@ -1949,6 +1995,7 @@ defmodule NotexWeb.NotebookLive do
 
     socket
     |> assign(:notebook, notebook)
+    |> assign(:project_url, project_path())
     |> assign(:projects, Notebooks.list_projects())
     |> assign(:project_name_form, to_form(%{"name" => notebook.title}, as: :project))
     |> assign(:sources, sources)
@@ -1971,6 +2018,14 @@ defmodule NotexWeb.NotebookLive do
     |> assign(:chat_message_count, length(chat_messages))
     |> assign(:streaming_assistant_content, %{})
     |> stream_messages(chat_messages, reset: true)
+  end
+
+  defp push_project_patch(socket) do
+    push_patch(socket, to: project_path())
+  end
+
+  defp project_path do
+    ~p"/projects/#{Notebooks.current_project_id()}"
   end
 
   defp refresh_sources(socket) do
@@ -2110,6 +2165,18 @@ defmodule NotexWeb.NotebookLive do
 
   defp format_video_reason({:ffmpeg_failed, status, output}) do
     "ffmpeg exited with status #{status}: #{output}"
+  end
+
+  defp format_video_reason(:missing_tts_command) do
+    "TTS command was not found. Install open-jtalk or set NOTEX_TTS_COMMAND."
+  end
+
+  defp format_video_reason({:tts_failed, status, output}) do
+    "TTS exited with status #{status}: #{output}"
+  end
+
+  defp format_video_reason({:missing_tts_resource, resource}) do
+    "TTS resource was not found: #{resource}"
   end
 
   defp format_video_reason(reason), do: inspect(reason)

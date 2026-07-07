@@ -9,6 +9,27 @@ Now you can visit [`localhost:4000`](http://localhost:4000) from your browser.
 
 Ready to run in production? Please [check our deployment guides](https://hexdocs.pm/phoenix/deployment.html).
 
+## Local media dependencies
+
+Video generation uses `ffmpeg` for MP4 rendering and a local TTS command for narration. Install these before using the Video media action:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y ffmpeg open-jtalk open-jtalk-mecab-naist-jdic hts-voice-nitech-jp-atr503-m001 fonts-noto-cjk
+```
+
+Japanese narration uses Open JTalk when it is installed. You can tune its rate with:
+
+```bash
+export NOTEX_OPEN_JTALK_RATE="1.0"
+```
+
+If Open JTalk is not installed, Notex falls back to `espeak-ng`/`espeak` when available. That fallback is mainly for basic narration and is not recommended for Japanese.
+
+```bash
+sudo apt-get install -y espeak-ng
+```
+
 ## Learn more
 
 * Official website: https://www.phoenixframework.org/

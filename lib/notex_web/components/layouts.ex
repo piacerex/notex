@@ -33,6 +33,7 @@ defmodule NotexWeb.Layouts do
 
   attr :notebook, :map, default: nil, doc: "optional notebook metadata for the app header"
   attr :projects, :list, default: []
+  attr :project_url, :string, default: "/"
   attr :project_name_form, :map, default: nil
   attr :llm_status, :map, default: nil
 
@@ -43,7 +44,7 @@ defmodule NotexWeb.Layouts do
     <header class="bg-white px-4 sm:px-6 lg:px-8">
       <nav class="flex min-h-12 w-full max-w-none items-center justify-between gap-4 py-1">
         <div class="flex min-w-0 flex-1 items-center gap-4">
-          <a href="/" class="flex shrink-0 items-center gap-2">
+          <a href={@project_url} class="flex shrink-0 items-center gap-2">
             <img src={~p"/images/logo.svg"} width="36" />
             <span class="text-sm font-semibold text-zinc-950">Notex</span>
           </a>

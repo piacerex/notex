@@ -23,7 +23,10 @@ config :notex, Notex.VideoGeneration,
   ffmpeg_command: "ffmpeg",
   duration: 12,
   size: "1280x720",
-  fontfile: System.get_env("NOTEX_VIDEO_FONTFILE")
+  fontfile: System.get_env("NOTEX_VIDEO_FONTFILE"),
+  tts_voice: "ja",
+  tts_speed: 135,
+  open_jtalk_rate: 1.0
 
 # Configure the endpoint
 config :notex, NotexWeb.Endpoint,

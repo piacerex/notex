@@ -228,16 +228,16 @@ defmodule Notex.NotebooksTest do
              })
 
     assert [_source_path] =
-             Path.wildcard(Path.join(storage_root(), "projects/NewPJ/inputs/*.json"))
+             Path.wildcard(Path.join(storage_root(), "projects/0001-NewPJ/inputs/*.json"))
 
     assert {:ok, renamed} = Notebooks.update_project_name("Alpha Project")
     assert renamed.title == "Alpha Project"
 
     assert [_source_path] =
-             Path.wildcard(Path.join(storage_root(), "projects/Alpha Project/inputs/*.json"))
+             Path.wildcard(Path.join(storage_root(), "projects/0001-Alpha Project/inputs/*.json"))
 
     assert [] ==
-             Path.wildcard(Path.join(storage_root(), "projects/NewPJ/inputs/*.json"))
+             Path.wildcard(Path.join(storage_root(), "projects/0001-NewPJ/inputs/*.json"))
   end
 
   test "creates and selects projects with collision-safe names" do
@@ -246,17 +246,23 @@ defmodule Notex.NotebooksTest do
 
     assert {:ok, first} = Notebooks.create_project()
     assert first.title == "NewPJ 2"
+    assert Notebooks.current_project_slug() == "0002-NewPJ 2"
+    assert Notebooks.current_project_id() == "0002"
 
     assert {:ok, second} = Notebooks.create_project()
     assert second.title == "NewPJ 3"
+    assert Notebooks.current_project_slug() == "0003-NewPJ 3"
 
     assert Enum.map(Notebooks.list_projects(), & &1.name) == ["NewPJ", "NewPJ 2", "NewPJ 3"]
 
-    assert {:ok, selected} = Notebooks.select_project("NewPJ")
+    assert {:ok, selected} = Notebooks.select_project("0001-NewPJ")
     assert selected.title == "NewPJ"
+    assert Notebooks.current_project_slug() == "0001-NewPJ"
 
     assert {:ok, renamed} = Notebooks.update_project_name("NewPJ 2")
     assert renamed.title == "NewPJ 4"
+    assert Notebooks.current_project_slug() == "0001-NewPJ 4"
+    assert Notebooks.current_project_id() == "0001"
   end
 
   test "preserves punctuation in project display names" do
@@ -293,9 +299,9 @@ defmodule Notex.NotebooksTest do
     assert Enum.map(Notebooks.list_projects(), & &1.name) == ["NewPJ"]
 
     assert [_source_path] =
-             Path.wildcard(Path.join(storage_root(), "projects/NewPJ/inputs/*.json"))
+             Path.wildcard(Path.join(storage_root(), "projects/0001-NewPJ/inputs/*.json"))
 
-    assert [] == Path.wildcard(Path.join(storage_root(), "projects/NewPJ 2"))
+    assert [] == Path.wildcard(Path.join(storage_root(), "projects/0002-NewPJ 2"))
   end
 
   test "data table studio artifacts normalize json answers to markdown" do
@@ -358,8 +364,11 @@ defmodule Notex.NotebooksTest do
     Application.put_env(:notex, Notex.LLM, Keyword.put(old_config, :provider, __MODULE__))
 
     Application.put_env(:notex, Notex.VideoGeneration,
-      runner: fn _executable, markdown, _config ->
+      runner: fn _executable, markdown, config ->
         assert markdown =~ "# Launch Explainer"
+        assert config.tts_voice == "ja"
+        assert config.tts_speed == 135
+        assert config.open_jtalk_rate == 1.0
         path = Path.join(System.tmp_dir!(), "notex-test-video.mp4")
         File.write!(path, "fake mp4")
         {:ok, path}

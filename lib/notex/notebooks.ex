@@ -10,12 +10,14 @@ defmodule Notex.Notebooks do
   @default_description "Local source-grounded notes"
   @chat_messages_file "chat-messages.jsonl"
   @active_project_key :active_project
+  @project_sequence_digits 4
 
   def project_name do
     project_metadata().name
   end
 
   def list_projects do
+    ensure_storage!()
     current = project_metadata()
 
     projects =
@@ -44,9 +46,10 @@ defmodule Notex.Notebooks do
   end
 
   def update_project_name(name) when is_binary(name) do
+    ensure_storage!()
     old = project_metadata()
     new_name = unique_project_name(name, old.slug)
-    new = %{name: new_name, slug: slug(new_name)}
+    new = %{name: new_name, slug: project_slug(new_name, old.slug)}
 
     ensure_project_dir_moved(old.slug, new.slug)
     set_active_project_metadata(new)
@@ -56,7 +59,7 @@ defmodule Notex.Notebooks do
   def create_project do
     ensure_storage!()
     name = unique_project_name(@default_title)
-    metadata = set_active_project_metadata(%{name: name, slug: slug(name)})
+    metadata = set_active_project_metadata(%{name: name, slug: project_slug(name)})
     File.mkdir_p!(project_dir(metadata.slug))
     File.mkdir_p!(inputs_dir(metadata.slug))
     File.mkdir_p!(outputs_dir(metadata.slug))
@@ -85,7 +88,8 @@ defmodule Notex.Notebooks do
   end
 
   def select_project(slug) when is_binary(slug) do
-    slug = normalize_project_slug(slug, @default_title)
+    ensure_storage!()
+    slug = find_project_slug(slug) || normalize_project_slug(slug, @default_title)
 
     if File.dir?(Path.join(projects_dir(), slug)) or slug == project_metadata().slug do
       set_active_project_metadata(%{name: project_name_for_slug(slug), slug: slug})
@@ -104,6 +108,7 @@ defmodule Notex.Notebooks do
   def get_notebook!(1), do: get_default_notebook()
 
   def get_default_notebook do
+    ensure_storage!()
     now = now()
 
     %Notebook{
@@ -1043,7 +1048,7 @@ defmodule Notex.Notebooks do
        Requirements:
        - Format the output as Markdown.
        - Start with one concise video title as an H1.
-       - Split the same kind of content used for an infographic into 4-6 parts.
+       - Split the same kind of content used for an infographic into 8-12 parts.
        - Each part must be a slide section with an H2 heading, 2-4 short visual bullets, and a "Narration:" paragraph.
        - Use the slides as infographic-style visual panels: concise labels, clear sequencing, and source-grounded facts.
        - Keep narration natural, spoken, and ready to read aloud.
@@ -1425,6 +1430,15 @@ defmodule Notex.Notebooks do
     end
   end
 
+  def current_project_slug do
+    project_metadata().slug
+  end
+
+  def current_project_id do
+    project_metadata().slug
+    |> project_id_for_slug()
+  end
+
   defp format_id(id) when is_integer(id),
     do: id |> Integer.to_string() |> String.pad_leading(3, "0")
 
@@ -1476,6 +1490,7 @@ defmodule Notex.Notebooks do
 
   defp ensure_storage! do
     File.mkdir_p!(projects_dir())
+    migrate_unnumbered_project_dirs!()
     active_slug = project_metadata().slug
     File.mkdir_p!(project_dir(active_slug))
     File.mkdir_p!(inputs_dir(active_slug))
@@ -1526,7 +1541,7 @@ defmodule Notex.Notebooks do
       |> Enum.sort()
       |> case do
         [] ->
-          %{name: @default_title, slug: slug(@default_title)}
+          %{name: @default_title, slug: project_slug(@default_title)}
 
         [slug | _] ->
           %{name: project_name_for_slug(slug), slug: slug}
@@ -1542,21 +1557,23 @@ defmodule Notex.Notebooks do
   end
 
   defp project_name_for_slug(project_slug, preferred_name \\ nil) do
+    project_name_slug = project_name_slug(project_slug)
+
     cond do
       is_binary(preferred_name) and String.trim(preferred_name) != "" ->
         normalize_project_name(preferred_name)
 
-      project_slug == "" ->
+      project_name_slug == "" ->
         @default_title
 
-      Regex.match?(~r/^newpj(?:[-\s]\d+)?$/i, project_slug) ->
-        project_slug
+      Regex.match?(~r/^newpj(?:[-\s]\d+)?$/i, project_name_slug) ->
+        project_name_slug
         |> String.replace("-", " ")
         |> String.replace(~r/^newpj/i, "NewPJ")
         |> normalize_project_name()
 
       true ->
-        project_slug
+        project_name_slug
         |> normalize_project_name()
     end
   end
@@ -1564,16 +1581,22 @@ defmodule Notex.Notebooks do
   defp unique_project_name(base_name, allowed_slug \\ nil) do
     requested_name = normalize_project_name(base_name)
     base_name = String.replace(requested_name, ~r/\s+\d+$/, "")
-    existing_slugs = existing_project_slugs() |> MapSet.delete(allowed_slug)
+    allowed_name_slug = if allowed_slug, do: project_name_slug(allowed_slug), else: nil
+
+    existing_name_slugs =
+      existing_project_slugs()
+      |> Enum.map(&project_name_slug/1)
+      |> MapSet.new()
+      |> MapSet.delete(allowed_name_slug)
 
     Stream.iterate(1, &(&1 + 1))
     |> Enum.find_value(fn
       1 ->
-        if slug(requested_name) in existing_slugs, do: nil, else: requested_name
+        if slug(requested_name) in existing_name_slugs, do: nil, else: requested_name
 
       index ->
         candidate = "#{base_name} #{index}"
-        if slug(candidate) in existing_slugs, do: nil, else: candidate
+        if slug(candidate) in existing_name_slugs, do: nil, else: candidate
     end)
   end
 
@@ -1615,7 +1638,88 @@ defmodule Notex.Notebooks do
 
   defp normalize_project_slug(project_slug, name) do
     project_slug = project_slug |> to_string() |> String.trim()
-    if project_slug == "", do: slug(name), else: project_slug
+    if project_slug == "", do: project_slug(name), else: project_slug
+  end
+
+  defp project_slug(name, existing_slug \\ nil) do
+    sequence = project_sequence(existing_slug) || next_project_sequence()
+    "#{format_project_sequence(sequence)}-#{slug(name)}"
+  end
+
+  defp find_project_slug(value) do
+    requested = normalize_project_slug(value, @default_title)
+    requested_name_slug = project_name_slug(requested)
+    requested_project_id = project_id_for_slug(requested)
+
+    existing_project_slugs()
+    |> Enum.find(fn existing_slug ->
+      existing_slug == requested or project_name_slug(existing_slug) == requested_name_slug or
+        project_id_for_slug(existing_slug) == requested_project_id
+    end)
+  end
+
+  defp project_name_slug(project_slug) do
+    project_slug
+    |> to_string()
+    |> String.replace(~r/^\d{4}-/, "")
+  end
+
+  defp project_sequence(project_slug) when is_binary(project_slug) do
+    case Regex.run(~r/^(\d{4})-/, project_slug, capture: :all_but_first) do
+      [sequence] -> String.to_integer(sequence)
+      _other -> nil
+    end
+  end
+
+  defp project_sequence(_project_slug), do: nil
+
+  defp project_id_for_slug(project_slug) do
+    case project_sequence(project_slug) do
+      nil -> project_name_slug(project_slug)
+      sequence -> format_project_sequence(sequence)
+    end
+  end
+
+  defp next_project_sequence do
+    existing_project_slugs()
+    |> Enum.map(&project_sequence/1)
+    |> Enum.reject(&is_nil/1)
+    |> case do
+      [] -> 1
+      sequences -> Enum.max(sequences) + 1
+    end
+  end
+
+  defp format_project_sequence(sequence) do
+    sequence
+    |> Integer.to_string()
+    |> String.pad_leading(@project_sequence_digits, "0")
+  end
+
+  defp migrate_unnumbered_project_dirs! do
+    projects_dir()
+    |> Path.join("*")
+    |> Path.wildcard()
+    |> Enum.filter(&File.dir?/1)
+    |> Enum.map(&Path.basename/1)
+    |> Enum.reject(&project_sequence/1)
+    |> Enum.sort()
+    |> Enum.each(fn old_slug ->
+      new_slug = project_slug(project_name_for_slug(old_slug))
+      old_path = project_dir(old_slug)
+      new_path = project_dir(new_slug)
+
+      cond do
+        old_slug == new_slug ->
+          :ok
+
+        File.exists?(new_path) ->
+          :ok
+
+        true ->
+          File.rename!(old_path, new_path)
+      end
+    end)
   end
 
   defp storage_root do

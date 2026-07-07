@@ -369,6 +369,7 @@ defmodule NotexWeb.NotebookLiveTest do
 
     assert has_element?(view, "#project-name-form input[value='Inline Project']")
     assert Notex.Notebooks.project_name() == "Inline Project"
+    assert_patch(view, ~p"/projects/0001")
   end
 
   test "creates and selects projects from the top bar", %{conn: conn} do
@@ -383,12 +384,28 @@ defmodule NotexWeb.NotebookLiveTest do
     assert has_element?(view, "#project-name-form input[value='NewPJ 2']")
     assert has_element?(view, "#project-select option", "NewPJ")
     assert has_element?(view, "#project-select option", "NewPJ 2")
+    assert has_element?(view, "#project-select option[value='0001-NewPJ']", "NewPJ")
+    assert has_element?(view, "#project-select option[value='0002-NewPJ 2']", "NewPJ 2")
+    assert_patch(view, ~p"/projects/0002")
 
     view
     |> element("#project-select-form")
-    |> render_change(%{project: %{slug: "NewPJ"}})
+    |> render_change(%{project: %{slug: "0001-NewPJ"}})
 
     assert has_element?(view, "#project-name-form input[value='NewPJ']")
+    assert_patch(view, ~p"/projects/0001")
+  end
+
+  test "loads a project from the URL", %{conn: conn} do
+    assert {:ok, created} = Notex.Notebooks.create_project()
+    assert created.title == "NewPJ 2"
+
+    Application.delete_env(:notex, :active_project)
+
+    {:ok, view, _html} = live(conn, ~p"/projects/0002")
+
+    assert has_element?(view, "#project-name-form input[value='NewPJ 2']")
+    assert Notex.Notebooks.current_project_slug() == "0002-NewPJ 2"
   end
 
   test "deletes the active project from the top bar", %{conn: conn} do
@@ -802,7 +819,7 @@ defmodule NotexWeb.NotebookLiveTest do
     assert has_element?(view, "#studio-action-mind-map", "MindMap")
     assert has_element?(view, "#studio-action-infographic", "Infographic")
     assert has_element?(view, "#studio-action-slides", "Slides")
-    refute has_element?(view, "#studio-action-video-explainer", "Video")
+    assert has_element?(view, "#studio-action-video-explainer", "Video")
     assert has_element?(view, "#studio-action-slides-settings")
 
     view
@@ -957,7 +974,6 @@ defmodule NotexWeb.NotebookLiveTest do
     assert has_element?(view, ".studio-slide")
     assert has_element?(view, "img.studio-slide-image[src^='data:image/svg+xml;base64,']")
     refute has_element?(view, "#studio-player .studio-markdown > h1")
-    refute has_element?(view, "#studio-action-video-explainer")
   end
 
   test "studio output list omits time and can delete media", %{conn: conn} do
