@@ -73,11 +73,12 @@ defmodule NotexWeb.Layouts do
                 as={:project}
                 id="project-select-form"
                 phx-change="select_project"
+                class="inline-flex items-center gap-1"
               >
                 <select
                   id="project-select"
                   name="project[slug]"
-                  class="h-8 max-w-44 rounded-md border border-zinc-200 bg-white px-2 text-sm font-medium text-zinc-700 outline-none transition hover:border-zinc-300 focus:border-zinc-400 focus:ring-2 focus:ring-zinc-100"
+                  class="plain-select h-8 max-w-44 bg-transparent px-1 text-sm font-medium text-zinc-700 outline-none transition focus:text-zinc-950"
                   aria-label="Select project"
                 >
                   <option
@@ -88,6 +89,10 @@ defmodule NotexWeb.Layouts do
                     {project.name}
                   </option>
                 </select>
+                <.icon
+                  name="hero-arrow-path"
+                  class="hidden size-3 shrink-0 text-zinc-500 motion-safe:animate-spin phx-change-loading:block"
+                />
               </.form>
               <button
                 :if={@project_name_form}

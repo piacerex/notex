@@ -384,6 +384,11 @@ body {
   background-color: #eeeef6;
 }
 
+.plain-select option {
+  background-color: #ffffff;
+  color: #18181b;
+}
+
 html[data-theme="dark"],
 [data-theme="dark"] body,
 [data-theme="dark"] main {
