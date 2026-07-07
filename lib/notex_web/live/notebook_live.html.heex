@@ -206,20 +206,30 @@
                   id="web-results"
                   class="max-h-[29.75rem] min-h-0 flex-none space-y-1 overflow-y-auto pr-1"
                 >
-                  <label
+                  <div
                     :for={result <- @web_results}
                     id={"web-result-#{result.id}"}
                     class="flex min-h-14 items-center gap-3 rounded-lg px-2 py-2 transition hover:bg-zinc-100"
                   >
-                    <img
-                      src={favicon_src(result.url)}
-                      alt=""
-                      class="size-7 shrink-0 rounded-md"
-                    />
-                    <div class="min-w-0 flex-1">
-                      <p class="truncate text-sm leading-5 text-zinc-950">{result.title}</p>
-                      <p class="truncate text-xs text-zinc-500">{result.url}</p>
-                    </div>
+                    <button
+                      id={"open-web-result-#{result.id}"}
+                      type="button"
+                      phx-click="open_web_result"
+                      phx-value-id={result.id}
+                      class="flex min-w-0 flex-1 items-center gap-3 rounded-md text-left"
+                    >
+                      <img
+                        src={favicon_src(result.url)}
+                        alt=""
+                        class="size-7 shrink-0 rounded-md"
+                      />
+                      <span class="min-w-0 flex-1">
+                        <span class="block truncate text-sm leading-5 text-zinc-950">
+                          {result.title}
+                        </span>
+                        <span class="block truncate text-xs text-zinc-500">{result.url}</span>
+                      </span>
+                    </button>
                     <input
                       :if={!MapSet.member?(@importing_web_result_ids, result.id)}
                       id={"web-result-checkbox-#{result.id}"}
@@ -236,7 +246,7 @@
                       name="hero-arrow-path"
                       class="size-5 shrink-0 text-zinc-500 motion-safe:animate-spin"
                     />
-                  </label>
+                  </div>
                 </div>
               </.form>
             </div>

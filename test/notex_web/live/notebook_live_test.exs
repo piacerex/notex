@@ -502,6 +502,26 @@ defmodule NotexWeb.NotebookLiveTest do
     assert has_element?(view, "#web-result-checkbox-#{result_id}[checked]")
   end
 
+  test "opens a web search result in the source detail view", %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/")
+
+    view
+    |> element("#web-search-form")
+    |> render_submit(%{web_search: %{query: "alpha"}})
+
+    assert render_until(view, "Alpha result")
+
+    result_id = Notex.WebSearch.result_id("https://example.com/alpha")
+
+    view
+    |> element("#open-web-result-#{result_id}")
+    |> render_click()
+
+    assert has_element?(view, "#source-detail-title", "Alpha result")
+    assert render_until(view, "Imported web source body.")
+    assert has_element?(view, "#source-detail-body", "URL: https://example.com/alpha")
+  end
+
   test "shows web results in an eight-row scrollable list", %{conn: conn} do
     {:ok, view, _html} = live(conn, ~p"/")
 

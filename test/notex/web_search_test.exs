@@ -93,7 +93,7 @@ defmodule Notex.WebSearchTest do
     refute body =~ "nope()"
   end
 
-  test "returns search results in provider order" do
+  test "reranks provider results by query term relevance" do
     requester = fn
       "https://www.bing.com/search?format=rss&q=alpha+metrics" ->
         {:ok,
@@ -110,8 +110,25 @@ defmodule Notex.WebSearchTest do
     assert {:ok, [first, second | _rest]} =
              WebSearch.search("alpha metrics", requester: requester)
 
-    assert first.url == "https://example.com/beta"
-    assert second.url == "https://example.com/other"
+    assert first.url == "https://example.com/alpha"
+    assert second.url == "https://example.com/beta"
+  end
+
+  test "prefers reputable sources when relevance is otherwise similar" do
+    requester = fn
+      "https://www.bing.com/search?format=rss&q=alpha+profile" ->
+        {:ok,
+         %{
+           status: 200,
+           body: ~s(<?xml version="1.0" encoding="utf-8" ?><rss version="2.0"><channel>
+             <item><title>Alpha profile blog</title><link>https://random.example/alpha</link><description>Alpha profile.</description></item>
+             <item><title>Alpha profile - Wikipedia</title><link>https://en.wikipedia.org/wiki/Alpha</link><description>Alpha profile.</description></item>
+             </channel></rss>)
+         }}
+    end
+
+    assert {:ok, [first | _rest]} = WebSearch.search("alpha profile", requester: requester)
+    assert first.url == "https://en.wikipedia.org/wiki/Alpha"
   end
 
   test "returns up to twenty web search results" do
@@ -266,6 +283,111 @@ defmodule Notex.WebSearchTest do
 
     assert {:ok, [%{url: "https://example.com/thiel"}]} =
              WebSearch.search("ピーター・ティール", requester: requester)
+  end
+
+  test "adds technical fallback queries for short English technology terms" do
+    requester = fn url ->
+      parsed_query = URI.parse(url).query || ""
+      query = URI.decode_query(parsed_query)["q"] || ""
+      send(self(), {:requested_query, query})
+
+      body =
+        case query do
+          "Angular web framework" ->
+            ~s(<?xml version="1.0" encoding="utf-8" ?><rss version="2.0"><channel>
+              <item><title>Home • Angular</title><link>https://angular.dev/</link><description>The web development framework for building modern apps.</description></item>
+            </channel></rss>)
+
+          _other ->
+            ~s(<?xml version="1.0" encoding="utf-8" ?><rss version="2.0"><channel>
+              <item><title>Unrelated result</title><link>https://example.com/unrelated</link><description>Provider returned an unrelated page.</description></item>
+            </channel></rss>)
+        end
+
+      {:ok, %{status: 200, body: body}}
+    end
+
+    assert {:ok, [%{url: "https://angular.dev/"} | _rest]} =
+             WebSearch.search("Angular", requester: requester)
+
+    assert_received {:requested_query, "Angular"}
+    assert_received {:requested_query, "Angular web framework"}
+    assert_received {:requested_query, "Angular software development"}
+  end
+
+  test "skips technical fallback queries when the initial English result is relevant" do
+    requester = fn url ->
+      parsed_query = URI.parse(url).query || ""
+      query = URI.decode_query(parsed_query)["q"] || ""
+      send(self(), {:requested_query, query})
+
+      {:ok,
+       %{
+         status: 200,
+         body: ~s(<?xml version="1.0" encoding="utf-8" ?><rss version="2.0"><channel>
+           <item><title>React</title><link>https://react.dev/</link><description>The library for web and native user interfaces.</description></item>
+         </channel></rss>)
+       }}
+    end
+
+    assert {:ok, [%{url: "https://react.dev/"}]} = WebSearch.search("React", requester: requester)
+
+    assert_received {:requested_query, "React"}
+    refute_received {:requested_query, "React web framework"}
+    refute_received {:requested_query, "React software development"}
+  end
+
+  test "adds conservative fallback queries for low-quality two-term English searches" do
+    requester = fn url ->
+      parsed_query = URI.parse(url).query || ""
+      query = URI.decode_query(parsed_query)["q"] || ""
+      send(self(), {:requested_query, query})
+
+      body =
+        case query do
+          "Phoenix LiveView documentation" ->
+            ~s(<?xml version="1.0" encoding="utf-8" ?><rss version="2.0"><channel>
+              <item><title>Phoenix LiveView documentation</title><link>https://hexdocs.pm/phoenix_live_view/</link><description>Phoenix LiveView official docs.</description></item>
+            </channel></rss>)
+
+          _other ->
+            ~s(<?xml version="1.0" encoding="utf-8" ?><rss version="2.0"><channel>
+              <item><title>Unrelated result</title><link>https://example.com/unrelated</link><description>Provider returned unrelated content.</description></item>
+            </channel></rss>)
+        end
+
+      {:ok, %{status: 200, body: body}}
+    end
+
+    assert {:ok, [%{url: "https://hexdocs.pm/phoenix_live_view/"} | _rest]} =
+             WebSearch.search("Phoenix LiveView", requester: requester)
+
+    assert_received {:requested_query, "Phoenix LiveView"}
+    assert_received {:requested_query, "Phoenix LiveView documentation"}
+    assert_received {:requested_query, "Phoenix LiveView official"}
+  end
+
+  test "skips two-term fallback queries when the initial result includes both terms" do
+    requester = fn url ->
+      parsed_query = URI.parse(url).query || ""
+      query = URI.decode_query(parsed_query)["q"] || ""
+      send(self(), {:requested_query, query})
+
+      {:ok,
+       %{
+         status: 200,
+         body: ~s(<?xml version="1.0" encoding="utf-8" ?><rss version="2.0"><channel>
+           <item><title>Phoenix LiveView guides</title><link>https://hexdocs.pm/phoenix_live_view/</link><description>Build real-time UI with Phoenix LiveView.</description></item>
+         </channel></rss>)
+       }}
+    end
+
+    assert {:ok, [%{url: "https://hexdocs.pm/phoenix_live_view/"}]} =
+             WebSearch.search("Phoenix LiveView", requester: requester)
+
+    assert_received {:requested_query, "Phoenix LiveView"}
+    refute_received {:requested_query, "Phoenix LiveView documentation"}
+    refute_received {:requested_query, "Phoenix LiveView official"}
   end
 
   test "searches connected katakana tokens with split fallback queries" do

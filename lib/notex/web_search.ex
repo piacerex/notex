@@ -107,9 +107,31 @@ defmodule Notex.WebSearch do
   end
 
   defp search_results(query, opts) do
-    query
-    |> search_queries()
-    |> Enum.reduce({[], []}, fn search_query, {results, errors} ->
+    tokens = query_tokens(query)
+    initial_queries = search_queries(tokens)
+
+    initial_queries
+    |> execute_search_queries(opts)
+    |> maybe_retry_low_quality_search(tokens, opts)
+    |> case do
+      {[], [reason | _errors]} ->
+        {:error, reason}
+
+      {results, _errors} ->
+        results =
+          results
+          |> merge_duplicate_results()
+          |> prefer_phrase_matches(query)
+          |> rank_search_results(query)
+          |> Enum.take(result_limit(opts))
+          |> Enum.map(&strip_search_metadata/1)
+
+        {:ok, results}
+    end
+  end
+
+  defp execute_search_queries(search_queries, opts) do
+    Enum.reduce(search_queries, {[], []}, fn search_query, {results, errors} ->
       rss_results =
         request_search_results(search_request_url(search_query.query), search_query, opts, :rss)
 
@@ -136,19 +158,16 @@ defmodule Notex.WebSearch do
           {results ++ parsed_results, errors}
       end
     end)
-    |> case do
-      {[], [reason | _errors]} ->
-        {:error, reason}
+  end
 
-      {results, _errors} ->
-        results =
-          results
-          |> merge_duplicate_results()
-          |> prefer_phrase_matches(query)
-          |> Enum.take(result_limit(opts))
-          |> Enum.map(&strip_search_metadata/1)
+  defp maybe_retry_low_quality_search({results, errors}, tokens, opts) do
+    if low_quality_search_results?(results, tokens) do
+      technical_queries = technical_search_queries(tokens)
 
-        {:ok, results}
+      {retry_results, retry_errors} = execute_search_queries(technical_queries, opts)
+      {results ++ retry_results, retry_errors ++ errors}
+    else
+      {results, errors}
     end
   end
 
@@ -170,8 +189,7 @@ defmodule Notex.WebSearch do
   defp parse_search_body(body, :rss), do: parse_results(body)
   defp parse_search_body(body, :html), do: parse_html_results(body)
 
-  defp search_queries(query) do
-    tokens = query_tokens(query)
+  defp search_queries(tokens) do
     middle_dot_queries = middle_dot_search_queries(tokens, 3)
     modifier_queries = modifier_search_queries(tokens)
     entity_queries = entity_search_queries(tokens)
@@ -181,6 +199,11 @@ defmodule Notex.WebSearch do
       weighted_query(plain_search_query(tokens), 3)
       | middle_dot_queries ++ modifier_queries ++ entity_queries ++ compact_split_queries
     ]
+    |> unique_search_queries()
+  end
+
+  defp unique_search_queries(queries) do
+    queries
     |> Enum.map(fn query -> %{query | query: String.trim(query.query)} end)
     |> Enum.reject(&(&1.query == ""))
     |> Enum.reduce([], fn query, queries ->
@@ -377,6 +400,38 @@ defmodule Notex.WebSearch do
     end)
   end
 
+  defp technical_search_queries([token]) do
+    if english_token?(token) do
+      [
+        weighted_query("#{token} web framework", 2),
+        weighted_query("#{token} software development", 1)
+      ]
+      |> unique_search_queries()
+    else
+      []
+    end
+  end
+
+  defp technical_search_queries(tokens) when length(tokens) in 2..3 do
+    if Enum.all?(tokens, &english_token?/1) do
+      query = Enum.join(tokens, " ")
+
+      [
+        weighted_query("#{query} documentation", 1),
+        weighted_query("#{query} official", 1)
+      ]
+      |> unique_search_queries()
+    else
+      []
+    end
+  end
+
+  defp technical_search_queries(_tokens), do: []
+
+  defp english_token?(token) do
+    String.match?(token, ~r/^[A-Za-z][A-Za-z0-9.+#-]*$/)
+  end
+
   defp modifier_tokens(tokens, entity_index) do
     tokens
     |> List.delete_at(entity_index)
@@ -464,6 +519,8 @@ defmodule Notex.WebSearch do
       fn result ->
         {
           modifier_match_count(result, modifiers),
+          title_modifier_match_count(result, modifiers),
+          reputable_source_score(result),
           Map.get(result, :search_weight, 0),
           -Map.get(result, :search_index, 0)
         }
@@ -525,6 +582,82 @@ defmodule Notex.WebSearch do
   defp modifier_match_count(result, modifiers) do
     text = searchable_result_text(result)
     Enum.count(modifiers, &String.contains?(text, &1))
+  end
+
+  defp low_quality_search_results?(results, [token]) do
+    english_token?(token) and not Enum.any?(results, &good_search_result?(&1, token))
+  end
+
+  defp low_quality_search_results?(results, tokens) when length(tokens) in 2..3 do
+    Enum.all?(tokens, &english_token?/1) and
+      not Enum.any?(results, &good_multi_term_search_result?(&1, tokens))
+  end
+
+  defp low_quality_search_results?(_results, _tokens), do: false
+
+  defp good_search_result?(result, token) do
+    normalized_token = normalize_search_text(token)
+    title = normalize_search_text(result.title || "")
+    url = normalize_search_text(result.url || "")
+    snippet = normalize_search_text(result.snippet || "")
+
+    String.contains?(title, normalized_token) or
+      String.contains?(url, normalized_token) or
+      String.contains?(snippet, normalized_token)
+  end
+
+  defp good_multi_term_search_result?(result, tokens) do
+    text = searchable_result_text(result)
+
+    tokens
+    |> Enum.map(&normalize_search_text/1)
+    |> Enum.count(&String.contains?(text, &1)) >= 2
+  end
+
+  defp title_modifier_match_count(_result, []), do: 0
+
+  defp title_modifier_match_count(result, modifiers) do
+    title = normalize_search_text(result.title || "")
+    Enum.count(modifiers, &String.contains?(title, &1))
+  end
+
+  defp reputable_source_score(result) do
+    host =
+      result.url
+      |> URI.parse()
+      |> Map.get(:host)
+      |> to_string()
+      |> String.downcase()
+
+    title = normalize_search_text(result.title || "")
+
+    cond do
+      String.contains?(host, "wikipedia.org") -> 4
+      String.ends_with?(host, ".go.jp") or String.ends_with?(host, ".gov") -> 4
+      String.ends_with?(host, ".ac.jp") or String.ends_with?(host, ".edu") -> 3
+      String.contains?(title, "公式") or String.contains?(title, "official") -> 3
+      trusted_publisher_host?(host) -> 2
+      true -> 0
+    end
+  end
+
+  defp trusted_publisher_host?(host) do
+    Enum.any?(
+      [
+        "nikkei.com",
+        "asahi.com",
+        "yomiuri.co.jp",
+        "mainichi.jp",
+        "sankei.com",
+        "nhk.or.jp",
+        "bbc.com",
+        "reuters.com",
+        "apnews.com",
+        "forbes.com",
+        "bloomberg.com"
+      ],
+      &String.ends_with?(host, &1)
+    )
   end
 
   defp merge_duplicate_results(results) do

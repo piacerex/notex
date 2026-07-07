@@ -2,6 +2,7 @@ defmodule NotexWeb.NotebookLive do
   use NotexWeb, :live_view
 
   alias Notex.{Notebooks, WebSearch}
+  alias Notex.Notebooks.Text
 
   alias Notex.MCP.Server, as: MCPServer
   alias Notex.Notebooks.Message
@@ -128,6 +129,25 @@ defmodule NotexWeb.NotebookLive do
   def handle_event("open_source", %{"id" => id}, socket) do
     source = Enum.find(socket.assigns.sources, &(to_string(&1.id) == id))
     {:noreply, socket |> assign(:active_source, source) |> assign(:active_source_position, nil)}
+  end
+
+  def handle_event("open_web_result", %{"id" => id}, socket) do
+    case Enum.find(socket.assigns.web_results, &(to_string(&1.id) == id)) do
+      nil ->
+        {:noreply, put_flash(socket, :error, "Web result not found.")}
+
+      result ->
+        parent = self()
+
+        Task.start(fn ->
+          send(parent, {:web_preview_completed, result.id, WebSearch.fetch_result(result)})
+        end)
+
+        {:noreply,
+         socket
+         |> assign(:active_source, loading_web_source(result))
+         |> assign(:active_source_position, nil)}
+    end
   end
 
   def handle_event(
@@ -663,6 +683,25 @@ defmodule NotexWeb.NotebookLive do
       end
 
     {:noreply, socket}
+  end
+
+  def handle_info({:web_preview_completed, result_id, result}, socket) do
+    active_source = socket.assigns.active_source
+
+    if active_source && Map.get(active_source, :id) == {:web_result, result_id} do
+      case result do
+        {:ok, source} ->
+          {:noreply, assign(socket, :active_source, preview_web_source(result_id, source))}
+
+        {:error, reason} ->
+          {:noreply,
+           socket
+           |> assign(:active_source, nil)
+           |> put_flash(:error, "Web preview failed: #{inspect(reason)}")}
+      end
+    else
+      {:noreply, socket}
+    end
   end
 
   def handle_info(
@@ -1881,6 +1920,24 @@ defmodule NotexWeb.NotebookLive do
     else
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  defp loading_web_source(result) do
+    %{
+      id: {:web_result, result.id},
+      title: result.title,
+      body: "Loading web source...",
+      word_count: 0
+    }
+  end
+
+  defp preview_web_source(result_id, %{title: title, body: body}) do
+    %{
+      id: {:web_result, result_id},
+      title: title,
+      body: body,
+      word_count: Text.word_count(body)
+    }
   end
 
   defp default_mcp_form do
