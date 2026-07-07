@@ -153,13 +153,22 @@
                 phx-submit="add_web_sources"
                 class="mt-2 flex min-h-0 flex-col space-y-2 border-t border-zinc-200 pt-2"
               >
-                <div class="grid h-8 grid-cols-[minmax(0,1fr)_4.75rem_1.25rem_1.25rem] items-center gap-1 pr-1">
-                  <div class="min-w-0">
+                <div class="grid h-8 grid-cols-[minmax(0,1fr)_4.75rem_1.25rem] items-center gap-1 pr-1">
+                  <div class="flex min-w-0 items-center gap-1">
+                    <button
+                      id="cancel-web-results-button"
+                      type="button"
+                      phx-click="cancel_web_results"
+                      class="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-zinc-500 hover:bg-zinc-100 hover:text-zinc-950"
+                      aria-label="Close web results"
+                    >
+                      <.icon name="hero-x-mark" class="size-4" />
+                    </button>
                     <button
                       id="add-web-sources-button"
                       type="submit"
                       disabled={MapSet.size(@importing_web_result_ids) > 0}
-                      class="inline-flex h-8 shrink-0 items-center justify-center gap-1 rounded-md bg-zinc-950 px-3 py-1 text-sm font-semibold text-white transition hover:bg-zinc-800 phx-submit-loading:opacity-70"
+                      class="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded-md bg-zinc-950 px-2.5 py-1 text-xs font-semibold text-white transition hover:bg-zinc-800 phx-submit-loading:opacity-70"
                     >
                       <.icon
                         :if={MapSet.size(@importing_web_result_ids) == 0}
@@ -178,7 +187,7 @@
                       </span>
                     </button>
                   </div>
-                  <span class="text-right text-sm font-medium text-zinc-950">Select all</span>
+                  <span class="text-right text-xs font-medium text-zinc-950">Select all</span>
                   <input
                     id="web-result-select-all"
                     type="checkbox"
@@ -191,15 +200,6 @@
                     }
                     class="size-5 translate-x-[3px] shrink-0 cursor-pointer rounded border-zinc-300 text-zinc-950 accent-zinc-950 transition hover:border-zinc-500 hover:ring-2 hover:ring-zinc-200 focus:ring-zinc-400"
                   />
-                  <button
-                    id="cancel-web-results-button"
-                    type="button"
-                    phx-click="cancel_web_results"
-                    class="inline-flex size-6 translate-x-1 shrink-0 items-center justify-center rounded-md text-zinc-500 hover:bg-zinc-100 hover:text-zinc-950"
-                    aria-label="Close web results"
-                  >
-                    <.icon name="hero-x-mark" class="size-3.5" />
-                  </button>
                 </div>
 
                 <div
@@ -256,7 +256,7 @@
             :if={!@active_source}
             class="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden px-4 pb-4"
           >
-            <div class="grid h-8 shrink-0 grid-cols-[minmax(0,1fr)_4.75rem_1rem] items-center gap-2 pl-2 pr-6.5">
+            <div class="flex h-8 shrink-0 items-center gap-2 pl-2 pr-3">
               <button
                 id="delete-selected-sources-button"
                 type="button"
@@ -266,20 +266,22 @@
               >
                 <.icon name="hero-trash" class="size-4" /> Delete selected
               </button>
-              <span class="text-right text-xs font-medium text-zinc-950">Select all</span>
-              <input
-                id="source-refs-select-all"
-                type="checkbox"
-                checked={all_source_refs_selected?(@sources, @selected_source_ids)}
-                phx-click="set_all_source_refs"
-                phx-value-checked={
-                  if(all_source_refs_selected?(@sources, @selected_source_ids),
-                    do: "false",
-                    else: "true"
-                  )
-                }
-                class="size-4 cursor-pointer rounded border-zinc-300 text-zinc-950 accent-zinc-950 transition hover:border-zinc-500 hover:ring-2 hover:ring-zinc-200 focus:ring-zinc-400"
-              />
+              <div class="ml-auto flex items-center gap-2">
+                <span class="text-right text-xs font-medium text-zinc-950">Select all</span>
+                <input
+                  id="source-refs-select-all"
+                  type="checkbox"
+                  checked={all_source_refs_selected?(@sources, @selected_source_ids)}
+                  phx-click="set_all_source_refs"
+                  phx-value-checked={
+                    if(all_source_refs_selected?(@sources, @selected_source_ids),
+                      do: "false",
+                      else: "true"
+                    )
+                  }
+                  class="size-4 cursor-pointer rounded border-zinc-300 text-zinc-950 accent-zinc-950 transition hover:border-zinc-500 hover:ring-2 hover:ring-zinc-200 focus:ring-zinc-400"
+                />
+              </div>
             </div>
 
             <.form

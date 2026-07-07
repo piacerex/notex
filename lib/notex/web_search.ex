@@ -98,12 +98,20 @@ defmodule Notex.WebSearch do
     |> Enum.take(@max_results)
   end
 
-  defp search_request_url(query) do
-    @search_url <> "?" <> URI.encode_query(%{format: "rss", q: query})
+  defp search_request_url(search_query) do
+    @search_url <> "?" <> URI.encode_query(search_params(search_query, %{format: "rss"}))
   end
 
-  defp html_search_request_url(query) do
-    @search_url <> "?" <> URI.encode_query(%{q: query})
+  defp html_search_request_url(search_query) do
+    @search_url <> "?" <> URI.encode_query(search_params(search_query, %{}))
+  end
+
+  defp search_params(%{query: query, market: :en}, params) do
+    Map.merge(params, %{q: query, mkt: "en-US", setlang: "en-US", cc: "US"})
+  end
+
+  defp search_params(%{query: query}, params) do
+    Map.put(params, :q, query)
   end
 
   defp search_results(query, opts) do
@@ -113,6 +121,7 @@ defmodule Notex.WebSearch do
     initial_queries
     |> execute_search_queries(opts)
     |> maybe_retry_low_quality_search(tokens, opts)
+    |> maybe_expand_latin_alias_search(tokens, opts)
     |> case do
       {[], [reason | _errors]} ->
         {:error, reason}
@@ -121,7 +130,7 @@ defmodule Notex.WebSearch do
         results =
           results
           |> merge_duplicate_results()
-          |> prefer_phrase_matches(query)
+          |> prefer_phrase_matches(query, opts)
           |> rank_search_results(query)
           |> Enum.take(result_limit(opts))
           |> Enum.map(&strip_search_metadata/1)
@@ -133,11 +142,11 @@ defmodule Notex.WebSearch do
   defp execute_search_queries(search_queries, opts) do
     Enum.reduce(search_queries, {[], []}, fn search_query, {results, errors} ->
       rss_results =
-        request_search_results(search_request_url(search_query.query), search_query, opts, :rss)
+        request_search_results(search_request_url(search_query), search_query, opts, :rss)
 
       html_results =
         request_search_results(
-          html_search_request_url(search_query.query),
+          html_search_request_url(search_query),
           search_query,
           opts,
           :html
@@ -171,6 +180,25 @@ defmodule Notex.WebSearch do
     end
   end
 
+  defp maybe_expand_latin_alias_search({results, errors}, tokens, opts) do
+    if Enum.any?(tokens, &String.match?(&1, ~r/[・･]/u)) do
+      queries =
+        results
+        |> latin_aliases_from_results(tokens)
+        |> Enum.map(fn alias_query ->
+          alias_query
+          |> weighted_query(2)
+          |> Map.put(:market, :en)
+          |> Map.put(:alias_match, true)
+        end)
+
+      {alias_results, alias_errors} = execute_search_queries(queries, opts)
+      {results ++ alias_results, alias_errors ++ errors}
+    else
+      {results, errors}
+    end
+  end
+
   defp request_search_results(url, search_query, opts, parser) do
     case request_body(url, opts) do
       {:ok, body} ->
@@ -178,6 +206,7 @@ defmodule Notex.WebSearch do
           body
           |> parse_search_body(parser)
           |> Enum.map(&Map.put(&1, :search_weight, search_query.weight))
+          |> Enum.map(&Map.put(&1, :alias_match, Map.get(search_query, :alias_match, false)))
 
         {:ok, parsed_results}
 
@@ -432,6 +461,51 @@ defmodule Notex.WebSearch do
     String.match?(token, ~r/^[A-Za-z][A-Za-z0-9.+#-]*$/)
   end
 
+  defp latin_aliases_from_results(results, tokens) do
+    results
+    |> Enum.flat_map(fn result ->
+      [result.title, result.snippet]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.flat_map(&latin_aliases_from_text(&1, tokens))
+    end)
+    |> Enum.uniq()
+    |> Enum.take(2)
+  end
+
+  defp latin_aliases_from_text(text, tokens) do
+    if alias_context_match?(text, tokens) do
+      text
+      |> latin_alias_candidates()
+      |> Enum.reject(&generic_latin_alias?/1)
+    else
+      []
+    end
+  end
+
+  defp latin_alias_candidates(text) do
+    ~r/\b[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){1,3}\b/
+    |> Regex.scan(text)
+    |> Enum.map(&List.first/1)
+  end
+
+  defp alias_context_match?(text, tokens) do
+    normalized_text = normalize_search_text(text)
+
+    tokens
+    |> Enum.filter(&String.match?(&1, ~r/[・･]/u))
+    |> Enum.flat_map(&middle_dot_parts/1)
+    |> Enum.map(&normalize_search_text/1)
+    |> Enum.reject(&(&1 == ""))
+    |> case do
+      [] -> false
+      parts -> Enum.all?(parts, &String.contains?(normalized_text, &1))
+    end
+  end
+
+  defp generic_latin_alias?(alias_text) do
+    alias_text in ["PayPal", "PayPal Mafia", "Facebook", "YouTube", "LinkedIn"]
+  end
+
   defp modifier_tokens(tokens, entity_index) do
     tokens
     |> List.delete_at(entity_index)
@@ -480,35 +554,50 @@ defmodule Notex.WebSearch do
     end
   end
 
-  defp prefer_phrase_matches(results, query) do
+  defp prefer_phrase_matches(results, query, opts) do
     phrases = connected_phrases(query)
 
     if phrases == [] do
       results
     else
-      matching_results = Enum.filter(results, &phrase_match?(&1, phrases))
+      matching_results = Enum.filter(results, &(phrase_match?(&1, phrases) or &1[:alias_match]))
 
       results =
         if matching_results == [] do
           results
         else
-          modifier_results = modifier_matching_results(matching_results, query)
-          if modifier_results == [], do: matching_results, else: modifier_results
+          prefer_modifier_matches_when_enough(matching_results, query, opts)
         end
 
       rank_search_results(results, query)
     end
   end
 
-  defp modifier_matching_results(results, query) do
+  defp prefer_modifier_matches_when_enough(results, query, opts) do
     modifiers = modifier_terms(query)
 
     if modifiers == [] do
       results
     else
-      high_weight_results = Enum.filter(results, &(Map.get(&1, :search_weight, 0) >= 2))
-      if high_weight_results == [], do: results, else: high_weight_results
+      modifier_results =
+        Enum.filter(results, &(modifier_match_count(&1, modifiers) > 0))
+
+      if length(modifier_results) >= min_modifier_match_count(results) do
+        modifier_results
+      else
+        body_modifier_results = body_modifier_matching_results(results, modifiers, opts)
+
+        if length(body_modifier_results) >= 2 do
+          body_modifier_results
+        else
+          results
+        end
+      end
     end
+  end
+
+  defp min_modifier_match_count(results) do
+    min(5, max(2, div(length(results), 2)))
   end
 
   defp rank_search_results(results, query) do
@@ -519,6 +608,7 @@ defmodule Notex.WebSearch do
       fn result ->
         {
           modifier_match_count(result, modifiers),
+          Map.get(result, :modifier_body_score, 0),
           title_modifier_match_count(result, modifiers),
           reputable_source_score(result),
           Map.get(result, :search_weight, 0),
@@ -582,6 +672,39 @@ defmodule Notex.WebSearch do
   defp modifier_match_count(result, modifiers) do
     text = searchable_result_text(result)
     Enum.count(modifiers, &String.contains?(text, &1))
+  end
+
+  defp body_modifier_matching_results(results, modifiers, opts) do
+    results
+    |> Enum.take(12)
+    |> Task.async_stream(
+      &modifier_body_score(&1, modifiers, opts),
+      max_concurrency: 4,
+      timeout: 8_000,
+      on_timeout: :kill_task
+    )
+    |> Enum.flat_map(fn
+      {:ok, result} ->
+        if Map.get(result, :modifier_body_score, 0) > 0, do: [result], else: []
+
+      _other ->
+        []
+    end)
+  end
+
+  defp modifier_body_score(result, modifiers, opts) do
+    case request_body(result.url, opts) do
+      {:ok, body} ->
+        text =
+          body
+          |> html_to_text()
+          |> normalize_search_text()
+
+        Map.put(result, :modifier_body_score, Enum.count(modifiers, &String.contains?(text, &1)))
+
+      {:error, _reason} ->
+        result
+    end
   end
 
   defp low_quality_search_results?(results, [token]) do
@@ -680,7 +803,7 @@ defmodule Notex.WebSearch do
   end
 
   defp strip_search_metadata(result) do
-    Map.drop(result, [:search_index, :search_weight])
+    Map.drop(result, [:search_index, :search_weight, :modifier_body_score, :alias_match])
   end
 
   defp searchable_result_text(result) do

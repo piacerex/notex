@@ -219,6 +219,193 @@ defmodule Notex.WebSearchTest do
            ]
   end
 
+  test "keeps entity-only matches when one modifier query also matches" do
+    requester = fn url ->
+      parsed_query = URI.parse(url).query || ""
+      query = URI.decode_query(parsed_query)["q"] || ""
+
+      body =
+        case query do
+          "ピーターティール 意思決定 戦略" ->
+            ~s(<?xml version="1.0" encoding="utf-8" ?><rss version="2.0"><channel>
+              <item><title>ピーター・ティールの意思決定</title><link>https://example.com/decision</link><description>意思決定と戦略。</description></item>
+            </channel></rss>)
+
+          "ピーターティール" ->
+            ~s(<?xml version="1.0" encoding="utf-8" ?><rss version="2.0"><channel>
+              <item><title>ピーター・ティール - Wikipedia</title><link>https://example.com/wiki</link><description>投資家ピーター・ティール。</description></item>
+              <item><title>ピーター・ティール思想の整理</title><link>https://example.com/thought</link><description>ピーター・ティールの思想。</description></item>
+            </channel></rss>)
+
+          _other ->
+            ~s(<?xml version="1.0" encoding="utf-8" ?><rss version="2.0"><channel>
+              <item><title>ピーターの出演作</title><link>https://example.com/actor</link><description>ピーターの人物情報。</description></item>
+            </channel></rss>)
+        end
+
+      {:ok, %{status: 200, body: body}}
+    end
+
+    assert {:ok, results} =
+             WebSearch.search("ピーター・ティール 意思決定 戦略", requester: requester)
+
+    assert Enum.map(results, & &1.url) == [
+             "https://example.com/decision",
+             "https://example.com/wiki",
+             "https://example.com/thought"
+           ]
+  end
+
+  test "expands middle-dot searches with latin aliases found in results" do
+    requester = fn url ->
+      parsed = URI.parse(url)
+      params = URI.decode_query(parsed.query || "")
+      query = params["q"] || ""
+      send(self(), {:requested_query, query, params["mkt"]})
+
+      body =
+        case {query, params["mkt"]} do
+          {"ピーターティール", _market} ->
+            ~s(<?xml version="1.0" encoding="utf-8" ?><rss version="2.0"><channel>
+              <item><title>ピーター・ティール / Peter Thielに関する最新記事</title><link>https://example.com/ja</link><description>ピーター・ティールの記事。</description></item>
+            </channel></rss>)
+
+          {"Peter Thiel", "en-US"} ->
+            ~s(<?xml version="1.0" encoding="utf-8" ?><rss version="2.0"><channel>
+              <item><title>Peter Thiel - Forbes</title><link>https://example.com/en</link><description>English profile.</description></item>
+            </channel></rss>)
+
+          _other ->
+            ~s(<?xml version="1.0" encoding="utf-8" ?><rss version="2.0"><channel></channel></rss>)
+        end
+
+      {:ok, %{status: 200, body: body}}
+    end
+
+    assert {:ok, results} = WebSearch.search("ピーター・ティール", requester: requester)
+
+    assert Enum.map(results, & &1.url) == ["https://example.com/ja", "https://example.com/en"]
+    assert_received {:requested_query, "Peter Thiel", "en-US"}
+  end
+
+  test "does not expand latin aliases without matching source context" do
+    requester = fn url ->
+      parsed = URI.parse(url)
+      params = URI.decode_query(parsed.query || "")
+      query = params["q"] || ""
+      send(self(), {:requested_query, query, params["mkt"]})
+
+      body =
+        case query do
+          "ピーターティール" ->
+            ~s(<?xml version="1.0" encoding="utf-8" ?><rss version="2.0"><channel>
+              <item><title>ピーター・ティールの思想</title><link>https://example.com/thiel</link><description>PayPal Mafia and Zero To One are mentioned elsewhere.</description></item>
+            </channel></rss>)
+
+          _other ->
+            ~s(<?xml version="1.0" encoding="utf-8" ?><rss version="2.0"><channel></channel></rss>)
+        end
+
+      {:ok, %{status: 200, body: body}}
+    end
+
+    assert {:ok, [%{url: "https://example.com/thiel"}]} =
+             WebSearch.search("ピーター・ティール", requester: requester)
+
+    refute_received {:requested_query, "Zero To One", "en-US"}
+    refute_received {:requested_query, "PayPal Mafia", "en-US"}
+  end
+
+  test "filters to modifier matches when there are enough relevant phrase results" do
+    requester = fn url ->
+      parsed_query = URI.parse(url).query || ""
+      query = URI.decode_query(parsed_query)["q"] || ""
+
+      items =
+        case query do
+          "ピーターティール" ->
+            [
+              {"ピーター・ティール - Wikipedia", "https://example.com/wiki", "投資家ピーター・ティール。"},
+              {"ピーター・ティール思想の整理", "https://example.com/thought", "ピーター・ティールの思想。"},
+              {"ピーター・ティールの投資判断", "https://example.com/decision", "意思決定と戦略。"},
+              {"ピーター・ティールと独占", "https://example.com/strategy", "競争戦略。"},
+              {"ピーター・ティールの講義", "https://example.com/lecture", "意思決定の講義。"}
+            ]
+
+          _other ->
+            []
+        end
+
+      body =
+        items
+        |> Enum.map_join(fn {title, link, description} ->
+          ~s(<item><title>#{title}</title><link>#{link}</link><description>#{description}</description></item>)
+        end)
+        |> then(
+          &~s(<?xml version="1.0" encoding="utf-8" ?><rss version="2.0"><channel>#{&1}</channel></rss>)
+        )
+
+      {:ok, %{status: 200, body: body}}
+    end
+
+    assert {:ok, results} =
+             WebSearch.search("ピーター・ティール 意思決定 戦略", requester: requester)
+
+    assert Enum.map(results, & &1.url) == [
+             "https://example.com/decision",
+             "https://example.com/strategy",
+             "https://example.com/lecture"
+           ]
+  end
+
+  test "filters by fetched page body when snippets do not expose modifier matches" do
+    requester = fn
+      "https://www.bing.com/search?format=rss&q=" <> encoded_query ->
+        query = URI.decode_www_form(encoded_query)
+
+        items =
+          case query do
+            "ピーターティール" ->
+              [
+                {"ピーター・ティール - Wikipedia", "https://example.com/wiki", "投資家ピーター・ティール。"},
+                {"ピーター・ティールの哲学", "https://example.com/philosophy", "ピーター・ティールの思想。"},
+                {"ピーター・ティールの近況", "https://example.com/news", "ピーター・ティールの人物情報。"}
+              ]
+
+            _other ->
+              []
+          end
+
+        body =
+          items
+          |> Enum.map_join(fn {title, link, description} ->
+            ~s(<item><title>#{title}</title><link>#{link}</link><description>#{description}</description></item>)
+          end)
+          |> then(
+            &~s(<?xml version="1.0" encoding="utf-8" ?><rss version="2.0"><channel>#{&1}</channel></rss>)
+          )
+
+        {:ok, %{status: 200, body: body}}
+
+      "https://example.com/wiki" ->
+        {:ok, %{status: 200, body: "<html><body>ピーター・ティールの戦略。</body></html>"}}
+
+      "https://example.com/philosophy" ->
+        {:ok, %{status: 200, body: "<html><body>ピーター・ティールの意思決定。</body></html>"}}
+
+      "https://example.com/news" ->
+        {:ok, %{status: 200, body: "<html><body>ピーター・ティールの近況。</body></html>"}}
+    end
+
+    assert {:ok, results} =
+             WebSearch.search("ピーター・ティール 意思決定 戦略", requester: requester)
+
+    assert Enum.map(results, & &1.url) == [
+             "https://example.com/wiki",
+             "https://example.com/philosophy"
+           ]
+  end
+
   test "normalizes katakana proper names embedded in Japanese questions" do
     requester = fn url ->
       parsed_query = URI.parse(url).query || ""
